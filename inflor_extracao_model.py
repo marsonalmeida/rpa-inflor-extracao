@@ -22,7 +22,7 @@ from selenium.webdriver.support import expected_conditions as EC
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from inflor_utils import (
     setup_logging, get_credentials, upload_to_s3, screenshot_on_error,
-    create_driver, DOWNLOAD_DIR_MODELO, BASE_DIR
+    create_driver, load_to_postgres, DOWNLOAD_DIR_MODELO, BASE_DIR
 )
 
 # ---------------------------------------------------------------------------
@@ -255,6 +255,11 @@ def main():
         xlsx_s3 = os.path.join(DOWNLOAD_DIR_MODELO, "base_modelo.xlsx")
         df_consolidado.to_excel(xlsx_s3, index=False)
         upload_to_s3(xlsx_s3, f"{S3_PREFIX}/xlsx/base_modelo.xlsx", log)
+
+        # ---------------------------------------------------------------
+        # POSTGRESQL (tabela fato)
+        # ---------------------------------------------------------------
+        load_to_postgres(df_consolidado, "fato_modelo", log)
 
         log.info(f"SUCESSO: {len(df_consolidado)} linhas extraídas e enviadas")
 

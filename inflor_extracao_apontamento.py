@@ -28,7 +28,7 @@ from selenium.webdriver.support import expected_conditions as EC
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from inflor_utils import (
     setup_logging, get_credentials, upload_to_s3, screenshot_on_error,
-    create_driver, wait_for_download,
+    create_driver, wait_for_download, load_to_postgres,
     DOWNLOAD_DIR_APONTAMENTO, BASE_DIR, S3_BUCKET
 )
 
@@ -254,6 +254,11 @@ def main():
         xlsx_s3 = os.path.join(DOWNLOAD_DIR_APONTAMENTO, "fat_apontamentos_automatico.xlsx")
         df.to_excel(xlsx_s3, index=False)
         upload_to_s3(xlsx_s3, f"{S3_PREFIX}/xlsx/fat_apontamentos_automatico.xlsx", log)
+
+        # ---------------------------------------------------------------
+        # POSTGRESQL (tabela fato)
+        # ---------------------------------------------------------------
+        load_to_postgres(df, "fato_apontamentos", log)
 
         log.info(f"SUCESSO: {len(df)} linhas extraídas e enviadas")
 

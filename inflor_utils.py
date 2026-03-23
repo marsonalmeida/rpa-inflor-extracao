@@ -2,7 +2,7 @@
 INFLOR - Módulo Comum (VM Windows)
 Funções compartilhadas entre os scripts de apontamento e modelo.
 
-Centraliza: credenciais, S3, logging, Chrome driver, waits.
+Centraliza: credenciais, S3, logging, Chrome driver, waits, PostgreSQL.
 """
 
 import os
@@ -19,6 +19,8 @@ from datetime import datetime
 S3_BUCKET = os.environ.get("S3_BUCKET", "datalake-inflor-raw")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 SECRET_NAME = os.environ.get("SECRET_NAME", "inflor/credentials")
+DB_SECRET_NAME = os.environ.get("DB_SECRET_NAME", "inflor/db")
+DB_SCHEMA = os.environ.get("DB_SCHEMA", "inflor")
 
 # Diretório base na VM Windows (adaptar se necessário)
 BASE_DIR = os.environ.get("INFLOR_BASE_DIR", r"C:\inflor-extrator")
@@ -188,6 +190,117 @@ def create_driver(download_dir: str, log: logging.Logger, headless: bool = False
         options=chrome_options
     )
     return driver
+
+
+# ---------------------------------------------------------------------------
+# POSTGRESQL
+# ---------------------------------------------------------------------------
+
+def _get_db_params(log: logging.Logger) -> dict:
+    """
+    Busca parâmetros de conexão do banco.
+    Ordem: Secrets Manager → variáveis de ambiente → .env
+    """
+    # Tenta Secrets Manager
+    try:
+        client = boto3.client("secretsmanager", region_name=AWS_REGION)
+        response = client.get_secret_value(SecretId=DB_SECRET_NAME)
+        params = json.loads(response["SecretString"])
+        log.info("Credenciais do banco obtidas do Secrets Manager")
+        return params
+    except Exception as e:
+        log.warning(f"Secrets Manager indisponível para DB ({e}), tentando variáveis de ambiente")
+
+    # Fallback: variáveis de ambiente / .env
+    try:
+        from decouple import config as dconfig
+        _get = dconfig
+    except Exception:
+        _get = lambda k, default=None: os.environ.get(k, default)
+
+    params = {
+        "DB_HOST":     _get("DB_HOST"),
+        "DB_PORT":     _get("DB_PORT", "5432"),
+        "DB_NAME":     _get("DB_NAME"),
+        "DB_USER":     _get("DB_USER"),
+        "DB_PASSWORD": _get("DB_PASSWORD"),
+    }
+
+    if not all([params["DB_HOST"], params["DB_NAME"], params["DB_USER"], params["DB_PASSWORD"]]):
+        raise RuntimeError(
+            "Credenciais do banco incompletas. "
+            "Configure inflor/db no Secrets Manager ou DB_HOST/DB_NAME/DB_USER/DB_PASSWORD no .env"
+        )
+
+    log.info("Credenciais do banco obtidas de variáveis de ambiente / .env")
+    return params
+
+
+def get_db_engine(log: logging.Logger):
+    """Cria SQLAlchemy engine para PostgreSQL."""
+    from sqlalchemy import create_engine
+
+    p = _get_db_params(log)
+    # URL sem expor senha nos logs
+    url = (
+        f"postgresql+psycopg2://{p['DB_USER']}:{p['DB_PASSWORD']}"
+        f"@{p['DB_HOST']}:{p['DB_PORT']}/{p['DB_NAME']}"
+    )
+    engine = create_engine(
+        url,
+        pool_pre_ping=True,   # verifica conexão antes de usar
+        pool_size=2,
+        max_overflow=0,
+        connect_args={"connect_timeout": 10},
+    )
+    log.info(f"Engine PostgreSQL criado: {p['DB_HOST']}:{p['DB_PORT']}/{p['DB_NAME']}")
+    return engine
+
+
+def load_to_postgres(df, table: str, log: logging.Logger, schema: str = None):
+    """
+    Carga atômica na tabela fato do PostgreSQL.
+
+    Estratégia full-refresh segura:
+      1. Cria schema se não existir
+      2. Se a tabela já existe → TRUNCATE
+      3. INSERT de todos os dados
+    Tudo dentro de uma única transação: se o INSERT falhar,
+    o TRUNCATE é revertido automaticamente (rollback).
+    """
+    from sqlalchemy import text
+
+    schema = schema or DB_SCHEMA
+    engine = get_db_engine(log)
+
+    with engine.begin() as conn:
+        # Garante que o schema existe
+        conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+
+        # Verifica se a tabela já existe
+        tabela_existe = conn.execute(text("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = :schema
+                AND   table_name   = :table
+            )
+        """), {"schema": schema, "table": table}).scalar()
+
+        if tabela_existe:
+            conn.execute(text(f'TRUNCATE TABLE "{schema}"."{table}"'))
+            log.info(f"TRUNCATE em {schema}.{table}")
+
+        df.to_sql(
+            name=table,
+            con=conn,
+            schema=schema,
+            if_exists="append",   # append pois já truncamos (ou tabela nova)
+            index=False,
+            method="multi",       # INSERT em lote (mais rápido)
+            chunksize=500,
+        )
+
+    log.info(f"PostgreSQL: {len(df)} linhas inseridas em {schema}.{table}")
 
 
 # ---------------------------------------------------------------------------
