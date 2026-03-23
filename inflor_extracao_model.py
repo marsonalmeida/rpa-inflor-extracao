@@ -12,6 +12,7 @@ import time
 import shutil
 import pandas as pd
 from datetime import date, datetime
+from dateutil.relativedelta import relativedelta
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -39,30 +40,34 @@ SAIDA_LOCAL = os.environ.get(
 )
 
 # ---------------------------------------------------------------------------
-# PERÍODOS (mantidos do original)
-# TODO: Calcular dinamicamente ou ler de config no S3
+# PERÍODOS (dinâmico: 4 anos retroativos, trimestres de 3 meses)
 # ---------------------------------------------------------------------------
-HOJE = date.today()
+ANOS_RETROATIVOS = int(os.environ.get("ANOS_RETROATIVOS", "4"))
 
-LISTA_PERIODOS = [
-    (date(2022, 7, 1),  date(2022, 12, 31)),
-    (date(2023, 1, 1),  date(2023, 6, 30)),
-    (date(2023, 7, 1),  date(2023, 12, 31)),
-    (date(2024, 1, 1),  date(2024, 2, 29)),
-    (date(2024, 3, 1),  date(2024, 4, 30)),
-    (date(2024, 5, 1),  date(2024, 6, 30)),
-    (date(2024, 7, 1),  date(2024, 8, 31)),
-    (date(2024, 9, 1),  date(2024, 10, 31)),
-    (date(2024, 11, 1), date(2024, 12, 31)),
-    (date(2025, 1, 1),  date(2025, 3, 31)),
-    (date(2025, 4, 1),  date(2025, 6, 30)),
-    (date(2025, 7, 1),  date(2025, 10, 31)),
-    (date(2025, 11, 1), date(2025, 12, 31)),
-    (date(2026, 1, 1),  date(2026, 2, 28)),
-]
 
-# Filtra períodos futuros
-PERIODOS_VALIDOS = [(ini, min(fim, HOJE)) for ini, fim in LISTA_PERIODOS if ini <= HOJE]
+def gerar_periodos(anos_retroativos: int = 4) -> list:
+    """
+    Gera lista de períodos trimestrais (3 em 3 meses) alinhados ao calendário,
+    cobrindo os últimos N anos até hoje.
+    """
+    hoje = date.today()
+    inicio = hoje - relativedelta(years=anos_retroativos)
+
+    # Alinha ao início do trimestre
+    mes_ini_trimestre = ((inicio.month - 1) // 3) * 3 + 1
+    atual = date(inicio.year, mes_ini_trimestre, 1)
+
+    periodos = []
+    while atual <= hoje:
+        fim_trimestre = atual + relativedelta(months=3) - relativedelta(days=1)
+        fim = min(fim_trimestre, hoje)
+        periodos.append((atual, fim))
+        atual += relativedelta(months=3)
+
+    return periodos
+
+
+PERIODOS_VALIDOS = gerar_periodos(ANOS_RETROATIVOS)
 
 
 # ---------------------------------------------------------------------------
