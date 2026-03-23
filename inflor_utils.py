@@ -2,7 +2,9 @@
 INFLOR - Módulo Comum (VM Windows)
 Funções compartilhadas entre os scripts de apontamento e modelo.
 
-Centraliza: credenciais, S3, logging, Chrome driver, waits, PostgreSQL.
+Centraliza: credenciais, lake S3 (re.green-assets), logging, Chrome driver, waits.
+Destino: re.green-assets/[env]-monitoring-onedrive-sync → NiFi detecta → EMR → lake refined.
+DRY_RUN=True: extrai e salva local apenas, sem subir ao lake (ideal para testes).
 """
 
 import os
@@ -18,12 +20,35 @@ from logging.handlers import RotatingFileHandler
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-S3_BUCKET = os.environ.get("S3_BUCKET", "datalake-inflor-raw")
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-SECRET_NAME = os.environ.get("SECRET_NAME", "inflor/credentials")
-DB_SECRET_NAME = os.environ.get("DB_SECRET_NAME", "inflor/db")
-DB_SCHEMA = os.environ.get("DB_SCHEMA", "inflor")
-CW_LOG_GROUP = os.environ.get("CLOUDWATCH_LOG_GROUP", "")
+try:
+    from decouple import config as _cfg
+except ImportError:
+    _cfg = lambda k, default=None, cast=None: (
+        cast(os.environ.get(k, default)) if cast else os.environ.get(k, default)
+    )
+
+AWS_REGION   = _cfg("AWS_REGION",   default="us-east-1")
+SECRET_NAME  = _cfg("SECRET_NAME",  default="inflor/credentials")
+CW_LOG_GROUP = _cfg("CLOUDWATCH_LOG_GROUP", default="")
+
+# Lake S3: bucket monitorado pelo NiFi → EMR → refined
+LAKE_S3_BUCKET = _cfg("LAKE_S3_BUCKET", default="re.green-assets")
+LAKE_ENV       = _cfg("LAKE_ENV",       default="prd")   # "stg" | "prd"
+DRY_RUN        = _cfg("DRY_RUN",        default=False, cast=bool)
+
+LAKE_PATH_APONTAMENTOS = (
+    f"{LAKE_ENV}-monitoring-onedrive-sync/"
+    "Opera\u00e7\u00f5es/Atividades executadas/"
+    "fat_apontamentos_automatico.xlsx"
+)
+LAKE_PATH_MODELO = (
+    f"{LAKE_ENV}-monitoring-onedrive-sync/"
+    "Opera\u00e7\u00f5es/Detalhamento de Talh\u00f5es/Pol\u00edgonos/"
+    "base_modelo.xlsx"
+)
+
+# Bucket de debug (screenshots/html em falhas) — separado do lake
+DEBUG_S3_BUCKET = _cfg("DEBUG_S3_BUCKET", default="datalake-inflor-raw")
 
 # Diretório base na VM Windows (adaptar se necessário)
 BASE_DIR = os.environ.get("INFLOR_BASE_DIR", r"C:\inflor-extrator")
@@ -118,7 +143,7 @@ def log_summary(log: _RunAdapter, script: str, inicio: float, **metricas):
     Loga resumo final da execução com métricas consolidadas.
 
     Uso:
-        log_summary(log, "apontamentos", t0, linhas=15234, destinos="S3+PostgreSQL")
+        log_summary(log, "apontamentos", t0, linhas=15234, destinos="local+lake(prd)")
     """
     duracao = time.time() - inicio
     mins, secs = divmod(int(duracao), 60)
@@ -178,13 +203,13 @@ def get_credentials(log: logging.Logger) -> tuple[str, str]:
         log.info("Credenciais obtidas de variáveis de ambiente")
         return login, senha
 
-    # Fallback 2: arquivo .env (compatibilidade com processo atual)
+    # Fallback 2: arquivo .env via decouple
     try:
-        from decouple import config
-        login = config("LOGIN_INFLOR")
-        senha = config("SENHA_INFLOR")
-        log.info("Credenciais obtidas do arquivo .env (decouple)")
-        return login, senha
+        login = _cfg("LOGIN_INFLOR")
+        senha = _cfg("SENHA_INFLOR")
+        if login and senha:
+            log.info("Credenciais obtidas do arquivo .env")
+            return login, senha
     except Exception:
         pass
 
@@ -199,19 +224,50 @@ def get_s3_client():
     return boto3.client("s3", region_name=AWS_REGION)
 
 
-def upload_to_s3(local_path: str, s3_key: str, log: logging.Logger, retries: int = 3):
-    """Upload arquivo para S3 com retry automático."""
+def upload_to_s3(local_path: str, s3_key: str, log: logging.Logger,
+                 bucket: str = None, retries: int = 3):
+    """Upload arquivo para S3 com retry automático. Bucket padrão: DEBUG_S3_BUCKET."""
+    target_bucket = bucket or DEBUG_S3_BUCKET
+
     def _upload():
         s3 = get_s3_client()
-        s3.upload_file(local_path, S3_BUCKET, s3_key)
+        s3.upload_file(local_path, target_bucket, s3_key)
 
-    log.info(f"Upload: {local_path} -> s3://{S3_BUCKET}/{s3_key}")
+    log.info(f"Upload debug: {local_path} -> s3://{target_bucket}/{s3_key}")
     try:
         with_retry(_upload, retries=retries, delay=20, log=log,
                    label=f"upload {os.path.basename(local_path)}")
         log.info(f"Upload concluído: {s3_key}")
     except Exception as e:
         log.error(f"Falha no upload para S3 após {retries} tentativas: {e}")
+        raise
+
+
+def upload_to_lake(local_path: str, lake_key: str, log: logging.Logger) -> str | None:
+    """
+    Faz upload do arquivo local ao bucket do lake (re.green-assets).
+    O NiFi monitora esse caminho e dispara o job EMR de ingestão.
+
+    DRY_RUN=True  → apenas loga, não sobe ao S3.
+    Retorna a URL S3 ou None se DRY_RUN.
+    """
+    if DRY_RUN:
+        log.info(f"[DRY_RUN] Lake upload ignorado: s3://{LAKE_S3_BUCKET}/{lake_key}")
+        return None
+
+    def _upload():
+        s3 = get_s3_client()
+        s3.upload_file(local_path, LAKE_S3_BUCKET, lake_key)
+
+    url = f"s3://{LAKE_S3_BUCKET}/{lake_key}"
+    log.info(f"Upload lake ({LAKE_ENV}): {local_path} -> {url}")
+    try:
+        with_retry(_upload, retries=3, delay=20, log=log,
+                   label=f"upload lake {os.path.basename(local_path)}")
+        log.info(f"Upload lake OK: {url}")
+        return url
+    except Exception as e:
+        log.error(f"Falha no upload ao lake após 3 tentativas: {e}")
         raise
 
 
@@ -289,117 +345,6 @@ def create_driver(download_dir: str, log: logging.Logger, headless: bool = False
         options=chrome_options
     )
     return driver
-
-
-# ---------------------------------------------------------------------------
-# POSTGRESQL
-# ---------------------------------------------------------------------------
-
-def _get_db_params(log: logging.Logger) -> dict:
-    """
-    Busca parâmetros de conexão do banco.
-    Ordem: Secrets Manager → variáveis de ambiente → .env
-    """
-    # Tenta Secrets Manager
-    try:
-        client = boto3.client("secretsmanager", region_name=AWS_REGION)
-        response = client.get_secret_value(SecretId=DB_SECRET_NAME)
-        params = json.loads(response["SecretString"])
-        log.info("Credenciais do banco obtidas do Secrets Manager")
-        return params
-    except Exception as e:
-        log.warning(f"Secrets Manager indisponível para DB ({e}), tentando variáveis de ambiente")
-
-    # Fallback: variáveis de ambiente / .env
-    try:
-        from decouple import config as dconfig
-        _get = dconfig
-    except Exception:
-        _get = lambda k, default=None: os.environ.get(k, default)
-
-    params = {
-        "DB_HOST":     _get("DB_HOST"),
-        "DB_PORT":     _get("DB_PORT", "5432"),
-        "DB_NAME":     _get("DB_NAME"),
-        "DB_USER":     _get("DB_USER"),
-        "DB_PASSWORD": _get("DB_PASSWORD"),
-    }
-
-    if not all([params["DB_HOST"], params["DB_NAME"], params["DB_USER"], params["DB_PASSWORD"]]):
-        raise RuntimeError(
-            "Credenciais do banco incompletas. "
-            "Configure inflor/db no Secrets Manager ou DB_HOST/DB_NAME/DB_USER/DB_PASSWORD no .env"
-        )
-
-    log.info("Credenciais do banco obtidas de variáveis de ambiente / .env")
-    return params
-
-
-def get_db_engine(log: logging.Logger):
-    """Cria SQLAlchemy engine para PostgreSQL."""
-    from sqlalchemy import create_engine
-
-    p = _get_db_params(log)
-    # URL sem expor senha nos logs
-    url = (
-        f"postgresql+psycopg2://{p['DB_USER']}:{p['DB_PASSWORD']}"
-        f"@{p['DB_HOST']}:{p['DB_PORT']}/{p['DB_NAME']}"
-    )
-    engine = create_engine(
-        url,
-        pool_pre_ping=True,   # verifica conexão antes de usar
-        pool_size=2,
-        max_overflow=0,
-        connect_args={"connect_timeout": 10},
-    )
-    log.info(f"Engine PostgreSQL criado: {p['DB_HOST']}:{p['DB_PORT']}/{p['DB_NAME']}")
-    return engine
-
-
-def load_to_postgres(df, table: str, log: logging.Logger, schema: str = None):
-    """
-    Carga atômica na tabela fato do PostgreSQL.
-
-    Estratégia full-refresh segura:
-      1. Cria schema se não existir
-      2. Se a tabela já existe → TRUNCATE
-      3. INSERT de todos os dados
-    Tudo dentro de uma única transação: se o INSERT falhar,
-    o TRUNCATE é revertido automaticamente (rollback).
-    """
-    from sqlalchemy import text
-
-    schema = schema or DB_SCHEMA
-    engine = get_db_engine(log)
-
-    with engine.begin() as conn:
-        # Garante que o schema existe
-        conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
-
-        # Verifica se a tabela já existe
-        tabela_existe = conn.execute(text("""
-            SELECT EXISTS (
-                SELECT 1 FROM information_schema.tables
-                WHERE table_schema = :schema
-                AND   table_name   = :table
-            )
-        """), {"schema": schema, "table": table}).scalar()
-
-        if tabela_existe:
-            conn.execute(text(f'TRUNCATE TABLE "{schema}"."{table}"'))
-            log.info(f"TRUNCATE em {schema}.{table}")
-
-        df.to_sql(
-            name=table,
-            con=conn,
-            schema=schema,
-            if_exists="append",   # append pois já truncamos (ou tabela nova)
-            index=False,
-            method="multi",       # INSERT em lote (mais rápido)
-            chunksize=500,
-        )
-
-    log.info(f"PostgreSQL: {len(df)} linhas inseridas em {schema}.{table}")
 
 
 CONTROLE_FILE = os.path.join(LOG_DIR, "controle_execucoes.csv")

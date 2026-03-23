@@ -2,13 +2,15 @@
 INFLOR - Extração de Apontamentos (VM Windows)
 
 Executa na VM Windows via Task Scheduler.
-Melhoria sobre o original:
-- Credenciais via Secrets Manager (com fallback pra .env)
-- Upload pro S3 (mantém cópia local também)
-- Screenshot + HTML em caso de erro
-- Wait inteligente no download (não mais sleep 120 fixo)
-- Logging estruturado (arquivo + stdout)
-- Cópia local mantida para compatibilidade com NiFi/OneDrive
+Fluxo:
+  1. Login INFLOR → exporta ZIP → unzip → processa DataFrame
+  2. Salva XLSX local (backup/teste)
+  3. [se DRY_RUN=False] Upload direto ao lake S3 (re.green-assets)
+     → NiFi detecta → EMR processa → operation_executed_activity_fact
+  4. Log estruturado + controle_execucoes.csv
+
+DRY_RUN=True no .env: extrai e salva local apenas, sem subir ao lake.
+LAKE_ENV=stg|prd: controla qual ambiente do lake recebe os dados.
 """
 
 import os
@@ -28,16 +30,16 @@ from selenium.webdriver.support import expected_conditions as EC
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from inflor_utils import (
     setup_logging, log_step, log_summary,
-    get_credentials, upload_to_s3, screenshot_on_error,
-    create_driver, wait_for_download, load_to_postgres,
-    registrar_execucao,
-    DOWNLOAD_DIR_APONTAMENTO, OUTPUT_DIR_APONTAMENTO, BASE_DIR, S3_BUCKET
+    get_credentials, upload_to_s3, upload_to_lake, screenshot_on_error,
+    create_driver, wait_for_download, registrar_execucao,
+    DOWNLOAD_DIR_APONTAMENTO, OUTPUT_DIR_APONTAMENTO, BASE_DIR,
+    LAKE_PATH_APONTAMENTOS, LAKE_ENV, DRY_RUN,
 )
 
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-S3_PREFIX = "inflor/apontamentos"
+DEBUG_S3_PREFIX = "inflor/apontamentos"   # usado apenas para debug screenshots
 MESES_RETROATIVOS = int(os.environ.get("MESES_RETROATIVOS", "120"))
 HEADLESS = os.environ.get("HEADLESS", "false").lower() == "true"
 
@@ -210,40 +212,31 @@ def main():
             log.info(f"Destino: {arquivo_local}")
 
         # ---------------------------------------------------------------
-        # UPLOAD S3
+        # UPLOAD LAKE
         # ---------------------------------------------------------------
-        with log_step(log, "Upload S3"):
-            timestamp = datetime.now().strftime("%Y-%m-%d")
-            year, month, day = datetime.now().strftime("%Y"), datetime.now().strftime("%m"), datetime.now().strftime("%d")
-
-            parquet_local = os.path.join(DOWNLOAD_DIR_APONTAMENTO, f"apontamentos_{timestamp}.parquet")
-            df.to_parquet(parquet_local, index=False, engine="pyarrow")
-            upload_to_s3(parquet_local, f"{S3_PREFIX}/year={year}/month={month}/day={day}/apontamentos.parquet", log)
-
-            xlsx_s3 = os.path.join(DOWNLOAD_DIR_APONTAMENTO, "fat_apontamentos_automatico.xlsx")
-            df.to_excel(xlsx_s3, index=False)
-            upload_to_s3(xlsx_s3, f"{S3_PREFIX}/xlsx/fat_apontamentos_automatico.xlsx", log)
-
-        # ---------------------------------------------------------------
-        # POSTGRESQL
-        # ---------------------------------------------------------------
-        with log_step(log, "PostgreSQL"):
-            load_to_postgres(df, "fato_apontamentos", log)
+        destinos = "local"
+        with log_step(log, f"Upload lake [{LAKE_ENV}]"):
+            lake_url = upload_to_lake(arquivo_local, LAKE_PATH_APONTAMENTOS, log)
+            if lake_url:
+                destinos = f"local+lake({LAKE_ENV})"
+            else:
+                destinos = "local (DRY_RUN)"
 
         log_summary(log, "apontamentos", t0,
                     linhas=len(df),
                     periodo=f"{datain} a {datafim}",
-                    destinos="local+S3+PostgreSQL")
+                    lake_env=LAKE_ENV,
+                    destinos=destinos)
 
         registrar_execucao(
             script="apontamentos", run_id=log.run_id, inicio=t0,
-            status="SUCESSO", linhas=len(df), destinos="local+S3+PostgreSQL", log=log,
+            status="SUCESSO", linhas=len(df), destinos=destinos, log=log,
         )
 
     except Exception as e:
         log.error(f"FALHA NA PIPELINE: {e}", exc_info=True)
         if driver:
-            screenshot_on_error(driver, "apontamento", S3_PREFIX, log)
+            screenshot_on_error(driver, "apontamento", DEBUG_S3_PREFIX, log)
             driver.quit()
 
         registrar_execucao(

@@ -2,8 +2,16 @@
 INFLOR - Extração de Modelo/Cubo (VM Windows)
 
 Executa na VM Windows via Task Scheduler.
-Acessa relatório cubo (cdRelatorio=397), itera por períodos,
-consolida múltiplos XLS e envia pro S3.
+Fluxo:
+  1. Login INFLOR → itera períodos trimestrais (4 anos retroativos) → exporta XLS por período
+  2. Consolida todos os XLS em um único DataFrame
+  3. Salva XLSX local (backup/teste)
+  4. [se DRY_RUN=False] Upload direto ao lake S3 (re.green-assets)
+     → NiFi detecta → EMR processa → operation_land_plot_metrics_fact
+  5. Log estruturado + controle_execucoes.csv
+
+DRY_RUN=True no .env: extrai e salva local apenas, sem subir ao lake.
+LAKE_ENV=stg|prd: controla qual ambiente do lake recebe os dados.
 """
 
 import os
@@ -22,15 +30,16 @@ from selenium.webdriver.support import expected_conditions as EC
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from inflor_utils import (
     setup_logging, log_step, log_summary,
-    get_credentials, upload_to_s3, screenshot_on_error,
-    create_driver, load_to_postgres, registrar_execucao,
-    DOWNLOAD_DIR_MODELO, OUTPUT_DIR_MODELO, BASE_DIR
+    get_credentials, upload_to_s3, upload_to_lake, screenshot_on_error,
+    create_driver, registrar_execucao,
+    DOWNLOAD_DIR_MODELO, OUTPUT_DIR_MODELO, BASE_DIR,
+    LAKE_PATH_MODELO, LAKE_ENV, DRY_RUN,
 )
 
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-S3_PREFIX = "inflor/modelo"
+DEBUG_S3_PREFIX = "inflor/modelo"   # usado apenas para debug screenshots
 HEADLESS = os.environ.get("HEADLESS", "false").lower() == "true"
 
 # Caminho local de saída — configurável via .env (SAIDA_LOCAL_MODELO)
@@ -231,46 +240,37 @@ def main():
         # ---------------------------------------------------------------
         with log_step(log, "Salvar local"):
             os.makedirs(SAIDA_LOCAL, exist_ok=True)
-            arquivo_local = os.path.join(SAIDA_LOCAL, "base.xlsx")
+            arquivo_local = os.path.join(SAIDA_LOCAL, "base_modelo.xlsx")
             df_consolidado.to_excel(arquivo_local, index=False)
             log.info(f"Destino: {arquivo_local}")
 
         # ---------------------------------------------------------------
-        # UPLOAD S3
+        # UPLOAD LAKE
         # ---------------------------------------------------------------
-        with log_step(log, "Upload S3"):
-            timestamp = datetime.now().strftime("%Y-%m-%d")
-            year, month, day = datetime.now().strftime("%Y"), datetime.now().strftime("%m"), datetime.now().strftime("%d")
-
-            parquet_local = os.path.join(DOWNLOAD_DIR_MODELO, f"modelo_{timestamp}.parquet")
-            df_consolidado.to_parquet(parquet_local, index=False, engine="pyarrow")
-            upload_to_s3(parquet_local, f"{S3_PREFIX}/year={year}/month={month}/day={day}/modelo.parquet", log)
-
-            xlsx_s3 = os.path.join(DOWNLOAD_DIR_MODELO, "base_modelo.xlsx")
-            df_consolidado.to_excel(xlsx_s3, index=False)
-            upload_to_s3(xlsx_s3, f"{S3_PREFIX}/xlsx/base_modelo.xlsx", log)
-
-        # ---------------------------------------------------------------
-        # POSTGRESQL
-        # ---------------------------------------------------------------
-        with log_step(log, "PostgreSQL"):
-            load_to_postgres(df_consolidado, "fato_modelo", log)
+        destinos = "local"
+        with log_step(log, f"Upload lake [{LAKE_ENV}]"):
+            lake_url = upload_to_lake(arquivo_local, LAKE_PATH_MODELO, log)
+            if lake_url:
+                destinos = f"local+lake({LAKE_ENV})"
+            else:
+                destinos = "local (DRY_RUN)"
 
         log_summary(log, "modelo", t0,
                     periodos=len(PERIODOS_VALIDOS),
                     linhas=len(df_consolidado),
-                    destinos="local+S3+PostgreSQL")
+                    lake_env=LAKE_ENV,
+                    destinos=destinos)
 
         registrar_execucao(
             script="modelo", run_id=log.run_id, inicio=t0,
             status="SUCESSO", linhas=len(df_consolidado),
-            destinos="local+S3+PostgreSQL", log=log,
+            destinos=destinos, log=log,
         )
 
     except Exception as e:
         log.error(f"FALHA NA PIPELINE: {e}", exc_info=True)
         if driver:
-            screenshot_on_error(driver, "modelo", S3_PREFIX, log)
+            screenshot_on_error(driver, "modelo", DEBUG_S3_PREFIX, log)
             driver.quit()
 
         registrar_execucao(
