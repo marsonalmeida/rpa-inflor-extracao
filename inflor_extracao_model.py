@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from inflor_utils import (
     setup_logging, log_step, log_summary,
     get_credentials, upload_to_s3, screenshot_on_error,
-    create_driver, load_to_postgres, send_alert, registrar_execucao,
+    create_driver, load_to_postgres, registrar_execucao,
     DOWNLOAD_DIR_MODELO, OUTPUT_DIR_MODELO, BASE_DIR
 )
 
@@ -211,7 +211,7 @@ def main():
                 msg = (f"Arquivos incompletos: {len(arquivos_xls)} de "
                        f"{len(PERIODOS_VALIDOS)} períodos baixados")
                 log.warning(msg)
-                send_alert("[INFLOR] AVISO - Modelo com períodos faltando", msg, log=log)
+                log.warning(msg)
 
             dfs = []
             for arq in arquivos_xls:
@@ -273,11 +273,6 @@ def main():
             screenshot_on_error(driver, "modelo", S3_PREFIX, log)
             driver.quit()
 
-        send_alert(
-            subject="[INFLOR] FALHA - Extração Modelo",
-            message=f"Run ID: {log.run_id}\nErro: {e}",
-            log=log,
-        )
         registrar_execucao(
             script="modelo", run_id=log.run_id, inicio=t0,
             status="FALHA", erro=str(e), log=log,

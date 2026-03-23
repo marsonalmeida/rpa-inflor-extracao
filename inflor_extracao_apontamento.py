@@ -30,7 +30,7 @@ from inflor_utils import (
     setup_logging, log_step, log_summary,
     get_credentials, upload_to_s3, screenshot_on_error,
     create_driver, wait_for_download, load_to_postgres,
-    send_alert, registrar_execucao,
+    registrar_execucao,
     DOWNLOAD_DIR_APONTAMENTO, OUTPUT_DIR_APONTAMENTO, BASE_DIR, S3_BUCKET
 )
 
@@ -246,11 +246,6 @@ def main():
             screenshot_on_error(driver, "apontamento", S3_PREFIX, log)
             driver.quit()
 
-        send_alert(
-            subject="[INFLOR] FALHA - Extração Apontamentos",
-            message=f"Run ID: {log.run_id}\nErro: {e}",
-            log=log,
-        )
         registrar_execucao(
             script="apontamentos", run_id=log.run_id, inicio=t0,
             status="FALHA", erro=str(e), log=log,

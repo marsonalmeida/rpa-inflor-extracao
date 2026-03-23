@@ -23,7 +23,6 @@ AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 SECRET_NAME = os.environ.get("SECRET_NAME", "inflor/credentials")
 DB_SECRET_NAME = os.environ.get("DB_SECRET_NAME", "inflor/db")
 DB_SCHEMA = os.environ.get("DB_SCHEMA", "inflor")
-SNS_TOPIC_ARN = os.environ.get("SNS_TOPIC_ARN", "")
 CW_LOG_GROUP = os.environ.get("CLOUDWATCH_LOG_GROUP", "")
 
 # Diretório base na VM Windows (adaptar se necessário)
@@ -151,27 +150,6 @@ def with_retry(func, retries: int = 3, delay: int = 30, log=None, label: str = "
             time.sleep(delay)
 
 
-# ---------------------------------------------------------------------------
-# ALERTAS (SNS)
-# ---------------------------------------------------------------------------
-
-def send_alert(subject: str, message: str, log=None):
-    """
-    Envia alerta via AWS SNS.
-    Silencioso se SNS_TOPIC_ARN não estiver configurado.
-    """
-    if not SNS_TOPIC_ARN:
-        if log:
-            log.warning("SNS_TOPIC_ARN não configurado — alerta não enviado")
-        return
-    try:
-        sns = boto3.client("sns", region_name=AWS_REGION)
-        sns.publish(TopicArn=SNS_TOPIC_ARN, Subject=subject[:100], Message=message)
-        if log:
-            log.info(f"Alerta SNS enviado: {subject}")
-    except Exception as e:
-        if log:
-            log.warning(f"Falha ao enviar alerta SNS: {e}")
 
 
 # ---------------------------------------------------------------------------

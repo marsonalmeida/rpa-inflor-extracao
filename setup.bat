@@ -55,16 +55,7 @@ echo       --name inflor/db ^
 echo       --secret-string "{\"DB_HOST\":\"HOST\",\"DB_PORT\":\"5432\",\"DB_NAME\":\"DB\",\"DB_USER\":\"USER\",\"DB_PASSWORD\":\"PASS\"}"
 echo.
 
-echo [7/8] Criando tópico SNS para alertas...
-echo Execute o comando abaixo para criar o tópico e copie o ARN gerado para o .env:
-echo.
-echo   aws sns create-topic --name inflor-alertas
-echo   aws sns subscribe --topic-arn ARN_GERADO --protocol email --notification-endpoint SEU@EMAIL.COM
-echo.
-echo   Depois preencha SNS_TOPIC_ARN no arquivo C:\inflor-extrator\src\.env
-echo.
-
-echo [8/8] Configurando CloudWatch Logs (opcional)...
+echo [7/7] Configurando CloudWatch Logs (opcional)...
 echo Para habilitar logs no CloudWatch, execute:
 echo.
 echo   aws logs create-log-group --log-group-name /inflor/extracao
@@ -78,7 +69,7 @@ echo.
 echo Próximos passos:
 echo   1. Configure AWS CLI:            aws configure
 echo   2. Crie os secrets (passos 5 e 6 acima)
-echo   3. Configure SNS e CloudWatch (passos 7 e 8 acima)
+echo   3. Configure CloudWatch (passo 7 acima, opcional)
 echo   4. Teste manual:
 echo        python C:\inflor-extrator\src\inflor_extracao_apontamento.py
 echo        python C:\inflor-extrator\src\inflor_extracao_model.py
