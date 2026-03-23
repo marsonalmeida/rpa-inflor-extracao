@@ -402,56 +402,43 @@ def load_to_postgres(df, table: str, log: logging.Logger, schema: str = None):
     log.info(f"PostgreSQL: {len(df)} linhas inseridas em {schema}.{table}")
 
 
+CONTROLE_FILE = os.path.join(LOG_DIR, "controle_execucoes.csv")
+
+
 def registrar_execucao(script: str, run_id: str, inicio: float, status: str,
                         log=None, linhas: int = 0, erro: str = None, destinos: str = ""):
     """
-    Grava resultado da execução na tabela de controle (inflor.controle_execucoes).
-    Cria a tabela automaticamente se não existir.
+    Grava resultado da execução em CSV local (LOG_DIR/controle_execucoes.csv).
+    Cria o arquivo com cabeçalho se não existir.
     Nunca lança exceção — falha silenciosa com warning.
     """
+    import csv
+
+    campos = ["script", "run_id", "inicio", "fim", "status", "linhas", "erro", "destinos"]
+    linha = {
+        "script":   script,
+        "run_id":   run_id,
+        "inicio":   datetime.fromtimestamp(inicio).strftime("%Y-%m-%d %H:%M:%S"),
+        "fim":      datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "status":   status,
+        "linhas":   linhas,
+        "erro":     erro or "",
+        "destinos": destinos,
+    }
+
     try:
-        from sqlalchemy import text
-        _log = log or logging.getLogger("inflor")
-        engine = get_db_engine(_log)
-        schema = DB_SCHEMA
-
-        with engine.begin() as conn:
-            conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
-            conn.execute(text(f"""
-                CREATE TABLE IF NOT EXISTS "{schema}".controle_execucoes (
-                    id          SERIAL PRIMARY KEY,
-                    script      VARCHAR(50),
-                    run_id      VARCHAR(20),
-                    inicio      TIMESTAMP,
-                    fim         TIMESTAMP,
-                    status      VARCHAR(10),
-                    linhas      INTEGER,
-                    erro        TEXT,
-                    destinos    VARCHAR(200)
-                )
-            """))
-            conn.execute(text(f"""
-                INSERT INTO "{schema}".controle_execucoes
-                    (script, run_id, inicio, fim, status, linhas, erro, destinos)
-                VALUES
-                    (:script, :run_id, :inicio, :fim, :status, :linhas, :erro, :destinos)
-            """), {
-                "script":   script,
-                "run_id":   run_id,
-                "inicio":   datetime.fromtimestamp(inicio),
-                "fim":      datetime.now(),
-                "status":   status,
-                "linhas":   linhas,
-                "erro":     erro,
-                "destinos": destinos,
-            })
-
+        os.makedirs(LOG_DIR, exist_ok=True)
+        novo = not os.path.exists(CONTROLE_FILE)
+        with open(CONTROLE_FILE, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=campos)
+            if novo:
+                writer.writeheader()
+            writer.writerow(linha)
         if log:
-            log.info(f"Execução registrada em {schema}.controle_execucoes "
-                     f"[status={status} | linhas={linhas}]")
+            log.info(f"Execução registrada em {CONTROLE_FILE} [status={status} | linhas={linhas}]")
     except Exception as e:
         if log:
-            log.warning(f"Falha ao registrar execução no banco (não crítico): {e}")
+            log.warning(f"Falha ao registrar execução (não crítico): {e}")
 
 
 # ---------------------------------------------------------------------------
