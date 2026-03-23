@@ -23,12 +23,18 @@ AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 SECRET_NAME = os.environ.get("SECRET_NAME", "inflor/credentials")
 DB_SECRET_NAME = os.environ.get("DB_SECRET_NAME", "inflor/db")
 DB_SCHEMA = os.environ.get("DB_SCHEMA", "inflor")
+SNS_TOPIC_ARN = os.environ.get("SNS_TOPIC_ARN", "")
+CW_LOG_GROUP = os.environ.get("CLOUDWATCH_LOG_GROUP", "")
 
 # Diretório base na VM Windows (adaptar se necessário)
 BASE_DIR = os.environ.get("INFLOR_BASE_DIR", r"C:\inflor-extrator")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 DOWNLOAD_DIR_APONTAMENTO = os.path.join(BASE_DIR, "downloads", "apontamentos")
 DOWNLOAD_DIR_MODELO = os.path.join(BASE_DIR, "downloads", "modelo")
+OUTPUT_DIR_APONTAMENTO = os.environ.get("SAIDA_LOCAL_APONTAMENTO",
+                                         os.path.join(BASE_DIR, "output", "apontamentos"))
+OUTPUT_DIR_MODELO = os.environ.get("SAIDA_LOCAL_MODELO",
+                                    os.path.join(BASE_DIR, "output", "modelo"))
 
 # ---------------------------------------------------------------------------
 # LOGGING
@@ -69,6 +75,20 @@ def setup_logging(script_name: str) -> _RunAdapter:
     sh.setFormatter(fmt)
     logger.addHandler(sh)
 
+    # CloudWatch Logs (opcional — só ativa se CLOUDWATCH_LOG_GROUP estiver configurado)
+    if CW_LOG_GROUP:
+        try:
+            import watchtower
+            cw = watchtower.CloudWatchLogHandler(
+                log_group=CW_LOG_GROUP,
+                stream_name=f"{script_name}/{run_id}",
+                boto3_client=boto3.client("logs", region_name=AWS_REGION),
+            )
+            cw.setFormatter(fmt)
+            logger.addHandler(cw)
+        except Exception as e:
+            logger.warning(f"CloudWatch handler não iniciado: {e}")
+
     adapter = _RunAdapter(logger, {"script": script_name, "run_id": run_id})
     adapter.run_id = run_id
     return adapter
@@ -107,6 +127,51 @@ def log_summary(log: _RunAdapter, script: str, inicio: float, **metricas):
     log.info("=" * 60)
     log.info(f"RESUMO [{script}] | tempo={mins}m{secs:02d}s | {detalhes}")
     log.info("=" * 60)
+
+
+def with_retry(func, retries: int = 3, delay: int = 30, log=None, label: str = ""):
+    """
+    Executa func() com retry automático em caso de falha transitória.
+    Útil para operações de rede (S3, banco, credenciais).
+
+    Uso:
+        with_retry(lambda: upload_to_s3(...), retries=3, delay=30, log=log, label="Upload S3")
+    """
+    for attempt in range(1, retries + 1):
+        try:
+            return func()
+        except Exception as e:
+            if attempt == retries:
+                raise
+            if log:
+                log.warning(
+                    f"[tentativa {attempt}/{retries}] {label} falhou: {e}. "
+                    f"Retentando em {delay}s..."
+                )
+            time.sleep(delay)
+
+
+# ---------------------------------------------------------------------------
+# ALERTAS (SNS)
+# ---------------------------------------------------------------------------
+
+def send_alert(subject: str, message: str, log=None):
+    """
+    Envia alerta via AWS SNS.
+    Silencioso se SNS_TOPIC_ARN não estiver configurado.
+    """
+    if not SNS_TOPIC_ARN:
+        if log:
+            log.warning("SNS_TOPIC_ARN não configurado — alerta não enviado")
+        return
+    try:
+        sns = boto3.client("sns", region_name=AWS_REGION)
+        sns.publish(TopicArn=SNS_TOPIC_ARN, Subject=subject[:100], Message=message)
+        if log:
+            log.info(f"Alerta SNS enviado: {subject}")
+    except Exception as e:
+        if log:
+            log.warning(f"Falha ao enviar alerta SNS: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -156,15 +221,19 @@ def get_s3_client():
     return boto3.client("s3", region_name=AWS_REGION)
 
 
-def upload_to_s3(local_path: str, s3_key: str, log: logging.Logger):
-    """Upload arquivo para S3."""
-    try:
+def upload_to_s3(local_path: str, s3_key: str, log: logging.Logger, retries: int = 3):
+    """Upload arquivo para S3 com retry automático."""
+    def _upload():
         s3 = get_s3_client()
-        log.info(f"Upload: {local_path} -> s3://{S3_BUCKET}/{s3_key}")
         s3.upload_file(local_path, S3_BUCKET, s3_key)
+
+    log.info(f"Upload: {local_path} -> s3://{S3_BUCKET}/{s3_key}")
+    try:
+        with_retry(_upload, retries=retries, delay=20, log=log,
+                   label=f"upload {os.path.basename(local_path)}")
         log.info(f"Upload concluído: {s3_key}")
     except Exception as e:
-        log.error(f"Falha no upload para S3: {e}")
+        log.error(f"Falha no upload para S3 após {retries} tentativas: {e}")
         raise
 
 
@@ -353,6 +422,58 @@ def load_to_postgres(df, table: str, log: logging.Logger, schema: str = None):
         )
 
     log.info(f"PostgreSQL: {len(df)} linhas inseridas em {schema}.{table}")
+
+
+def registrar_execucao(script: str, run_id: str, inicio: float, status: str,
+                        log=None, linhas: int = 0, erro: str = None, destinos: str = ""):
+    """
+    Grava resultado da execução na tabela de controle (inflor.controle_execucoes).
+    Cria a tabela automaticamente se não existir.
+    Nunca lança exceção — falha silenciosa com warning.
+    """
+    try:
+        from sqlalchemy import text
+        _log = log or logging.getLogger("inflor")
+        engine = get_db_engine(_log)
+        schema = DB_SCHEMA
+
+        with engine.begin() as conn:
+            conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+            conn.execute(text(f"""
+                CREATE TABLE IF NOT EXISTS "{schema}".controle_execucoes (
+                    id          SERIAL PRIMARY KEY,
+                    script      VARCHAR(50),
+                    run_id      VARCHAR(20),
+                    inicio      TIMESTAMP,
+                    fim         TIMESTAMP,
+                    status      VARCHAR(10),
+                    linhas      INTEGER,
+                    erro        TEXT,
+                    destinos    VARCHAR(200)
+                )
+            """))
+            conn.execute(text(f"""
+                INSERT INTO "{schema}".controle_execucoes
+                    (script, run_id, inicio, fim, status, linhas, erro, destinos)
+                VALUES
+                    (:script, :run_id, :inicio, :fim, :status, :linhas, :erro, :destinos)
+            """), {
+                "script":   script,
+                "run_id":   run_id,
+                "inicio":   datetime.fromtimestamp(inicio),
+                "fim":      datetime.now(),
+                "status":   status,
+                "linhas":   linhas,
+                "erro":     erro,
+                "destinos": destinos,
+            })
+
+        if log:
+            log.info(f"Execução registrada em {schema}.controle_execucoes "
+                     f"[status={status} | linhas={linhas}]")
+    except Exception as e:
+        if log:
+            log.warning(f"Falha ao registrar execução no banco (não crítico): {e}")
 
 
 # ---------------------------------------------------------------------------

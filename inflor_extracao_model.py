@@ -23,7 +23,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from inflor_utils import (
     setup_logging, log_step, log_summary,
     get_credentials, upload_to_s3, screenshot_on_error,
-    create_driver, load_to_postgres, DOWNLOAD_DIR_MODELO, BASE_DIR
+    create_driver, load_to_postgres, send_alert, registrar_execucao,
+    DOWNLOAD_DIR_MODELO, OUTPUT_DIR_MODELO, BASE_DIR
 )
 
 # ---------------------------------------------------------------------------
@@ -32,13 +33,9 @@ from inflor_utils import (
 S3_PREFIX = "inflor/modelo"
 HEADLESS = os.environ.get("HEADLESS", "false").lower() == "true"
 
-USER = os.environ.get("USERNAME") or os.environ.get("USER")
-SAIDA_LOCAL = os.environ.get(
-    "SAIDA_LOCAL_MODELO",
-    os.path.join(r"C:\Users", USER,
-                 r"OneDrive - Regreen\Painel de monitoramento\Operações"
-                 r"\Detalhamento de Talhões\Inflor")
-)
+# Caminho local de saída — configurável via .env (SAIDA_LOCAL_MODELO)
+# Default: C:\inflor-extrator\output\modelo (não depende de usuário logado)
+SAIDA_LOCAL = OUTPUT_DIR_MODELO
 
 # ---------------------------------------------------------------------------
 # PERÍODOS (dinâmico: 4 anos retroativos, trimestres de 3 meses)
@@ -205,9 +202,16 @@ def main():
                 )
 
             arquivos_xls = sorted([f for f in os.listdir(DOWNLOAD_DIR_MODELO) if f.endswith(".xls")])
-            log.info(f"Arquivos XLS encontrados: {len(arquivos_xls)}")
+            log.info(f"Arquivos XLS encontrados: {len(arquivos_xls)} / esperados: {len(PERIODOS_VALIDOS)}")
+
             if not arquivos_xls:
                 raise FileNotFoundError("Nenhum XLS encontrado")
+
+            if len(arquivos_xls) < len(PERIODOS_VALIDOS):
+                msg = (f"Arquivos incompletos: {len(arquivos_xls)} de "
+                       f"{len(PERIODOS_VALIDOS)} períodos baixados")
+                log.warning(msg)
+                send_alert("[INFLOR] AVISO - Modelo com períodos faltando", msg, log=log)
 
             dfs = []
             for arq in arquivos_xls:
@@ -257,11 +261,27 @@ def main():
                     linhas=len(df_consolidado),
                     destinos="local+S3+PostgreSQL")
 
+        registrar_execucao(
+            script="modelo", run_id=log.run_id, inicio=t0,
+            status="SUCESSO", linhas=len(df_consolidado),
+            destinos="local+S3+PostgreSQL", log=log,
+        )
+
     except Exception as e:
         log.error(f"FALHA NA PIPELINE: {e}", exc_info=True)
         if driver:
             screenshot_on_error(driver, "modelo", S3_PREFIX, log)
             driver.quit()
+
+        send_alert(
+            subject="[INFLOR] FALHA - Extração Modelo",
+            message=f"Run ID: {log.run_id}\nErro: {e}",
+            log=log,
+        )
+        registrar_execucao(
+            script="modelo", run_id=log.run_id, inicio=t0,
+            status="FALHA", erro=str(e), log=log,
+        )
         sys.exit(1)
 
 

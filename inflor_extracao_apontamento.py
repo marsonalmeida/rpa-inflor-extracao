@@ -30,7 +30,8 @@ from inflor_utils import (
     setup_logging, log_step, log_summary,
     get_credentials, upload_to_s3, screenshot_on_error,
     create_driver, wait_for_download, load_to_postgres,
-    DOWNLOAD_DIR_APONTAMENTO, BASE_DIR, S3_BUCKET
+    send_alert, registrar_execucao,
+    DOWNLOAD_DIR_APONTAMENTO, OUTPUT_DIR_APONTAMENTO, BASE_DIR, S3_BUCKET
 )
 
 # ---------------------------------------------------------------------------
@@ -40,15 +41,9 @@ S3_PREFIX = "inflor/apontamentos"
 MESES_RETROATIVOS = int(os.environ.get("MESES_RETROATIVOS", "120"))
 HEADLESS = os.environ.get("HEADLESS", "false").lower() == "true"
 
-# Caminho local de saída (mantém compatibilidade com NiFi/OneDrive)
-# Ajuste conforme necessidade:
-USER = os.environ.get("USERNAME") or os.environ.get("USER")
-SAIDA_LOCAL = os.environ.get(
-    "SAIDA_LOCAL",
-    os.path.join(r"C:\Users", USER,
-                 r"Regreen\- Operacional - Documentos\OPERAÇÃO\01. PMO OPERAÇÂO"
-                 r"\03.FUP Mensal\01.Resultado Operacional\04.Bases_Portal_Indicadores")
-)
+# Caminho local de saída — configurável via .env (SAIDA_LOCAL_APONTAMENTO)
+# Default: C:\inflor-extrator\output\apontamentos (não depende de usuário logado)
+SAIDA_LOCAL = OUTPUT_DIR_APONTAMENTO
 
 # ---------------------------------------------------------------------------
 # MAIN
@@ -240,11 +235,26 @@ def main():
                     periodo=f"{datain} a {datafim}",
                     destinos="local+S3+PostgreSQL")
 
+        registrar_execucao(
+            script="apontamentos", run_id=log.run_id, inicio=t0,
+            status="SUCESSO", linhas=len(df), destinos="local+S3+PostgreSQL", log=log,
+        )
+
     except Exception as e:
         log.error(f"FALHA NA PIPELINE: {e}", exc_info=True)
         if driver:
             screenshot_on_error(driver, "apontamento", S3_PREFIX, log)
             driver.quit()
+
+        send_alert(
+            subject="[INFLOR] FALHA - Extração Apontamentos",
+            message=f"Run ID: {log.run_id}\nErro: {e}",
+            log=log,
+        )
+        registrar_execucao(
+            script="apontamentos", run_id=log.run_id, inicio=t0,
+            status="FALHA", erro=str(e), log=log,
+        )
         sys.exit(1)
 
 

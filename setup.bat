@@ -4,43 +4,84 @@ REM INFLOR Extrator - Setup na VM Windows
 REM Executa uma vez para configurar o ambiente
 REM ============================================================================
 
-echo [1/5] Criando estrutura de diretórios...
+echo [1/8] Criando estrutura de diretórios...
 mkdir C:\inflor-extrator\src 2>nul
 mkdir C:\inflor-extrator\logs 2>nul
 mkdir C:\inflor-extrator\downloads\apontamentos 2>nul
 mkdir C:\inflor-extrator\downloads\modelo 2>nul
+mkdir C:\inflor-extrator\output\apontamentos 2>nul
+mkdir C:\inflor-extrator\output\modelo 2>nul
 mkdir C:\inflor-extrator\debug 2>nul
 
-echo [2/5] Copiando scripts...
-copy /Y src\*.py C:\inflor-extrator\src\
+echo [2/8] Copiando scripts e configurações...
+copy /Y inflor_utils.py C:\inflor-extrator\src\
+copy /Y inflor_extracao_apontamento.py C:\inflor-extrator\src\
+copy /Y inflor_extracao_model.py C:\inflor-extrator\src\
 copy /Y requirements.txt C:\inflor-extrator\
+copy /Y .env C:\inflor-extrator\src\
 
-echo [3/5] Instalando dependências Python...
+echo [3/8] Instalando dependências Python...
 pip install -r requirements.txt
+if %errorlevel% neq 0 (
+    echo ERRO: Falha ao instalar dependências. Verifique se o Python está instalado.
+    pause
+    exit /b 1
+)
 
-echo [4/5] Configurando AWS CLI...
-echo Verifique se o AWS CLI está instalado e configurado:
-echo   aws configure
-echo   - Access Key ID
-echo   - Secret Access Key  
-echo   - Region: us-east-1
+echo [4/8] Verificando AWS CLI...
+aws --version >nul 2>&1
+if %errorlevel% neq 0 (
+    echo AVISO: AWS CLI não encontrado. Instale em https://aws.amazon.com/cli/
+    echo Após instalar, execute: aws configure
+) else (
+    echo AWS CLI OK. Verifique se está configurado: aws configure list
+)
+
+echo [5/8] Credenciais INFLOR no Secrets Manager...
+echo Execute o comando abaixo para criar/atualizar o secret:
+echo.
+echo   aws secretsmanager create-secret ^
+echo       --name inflor/credentials ^
+echo       --secret-string "{\"LOGIN_INFLOR\":\"lucas.castro@re.green\",\"SENHA_INFLOR\":\"SUA_SENHA\"}"
+echo.
+echo   (Se já existe, use put-secret-value no lugar de create-secret)
 echo.
 
-echo [5/5] Inserindo credenciais no Secrets Manager...
-echo Execute manualmente:
-echo   aws secretsmanager create-secret --name inflor/credentials --secret-string "{\"LOGIN_INFLOR\":\"SEU_USER\",\"SENHA_INFLOR\":\"SUA_SENHA\"}"
+echo [6/8] Credenciais PostgreSQL no Secrets Manager...
+echo Execute o comando abaixo após ter as credenciais do banco:
 echo.
-echo Ou se o secret já existe:
-echo   aws secretsmanager put-secret-value --secret-id inflor/credentials --secret-string "{\"LOGIN_INFLOR\":\"SEU_USER\",\"SENHA_INFLOR\":\"SUA_SENHA\"}"
+echo   aws secretsmanager create-secret ^
+echo       --name inflor/db ^
+echo       --secret-string "{\"DB_HOST\":\"HOST\",\"DB_PORT\":\"5432\",\"DB_NAME\":\"DB\",\"DB_USER\":\"USER\",\"DB_PASSWORD\":\"PASS\"}"
+echo.
+
+echo [7/8] Criando tópico SNS para alertas...
+echo Execute o comando abaixo para criar o tópico e copie o ARN gerado para o .env:
+echo.
+echo   aws sns create-topic --name inflor-alertas
+echo   aws sns subscribe --topic-arn ARN_GERADO --protocol email --notification-endpoint SEU@EMAIL.COM
+echo.
+echo   Depois preencha SNS_TOPIC_ARN no arquivo C:\inflor-extrator\src\.env
+echo.
+
+echo [8/8] Configurando CloudWatch Logs (opcional)...
+echo Para habilitar logs no CloudWatch, execute:
+echo.
+echo   aws logs create-log-group --log-group-name /inflor/extracao
+echo.
+echo   Depois preencha CLOUDWATCH_LOG_GROUP=/inflor/extracao no .env
 echo.
 
 echo ============================================================================
 echo Setup concluído!
 echo.
 echo Próximos passos:
-echo   1. Configure o AWS CLI (aws configure)
-echo   2. Insira credenciais no Secrets Manager (comando acima)
-echo   3. Teste manual: python C:\inflor-extrator\src\inflor_extracao_apontamento.py
-echo   4. Configure o Task Scheduler (veja setup_task_scheduler.bat)
+echo   1. Configure AWS CLI:            aws configure
+echo   2. Crie os secrets (passos 5 e 6 acima)
+echo   3. Configure SNS e CloudWatch (passos 7 e 8 acima)
+echo   4. Teste manual:
+echo        python C:\inflor-extrator\src\inflor_extracao_apontamento.py
+echo        python C:\inflor-extrator\src\inflor_extracao_model.py
+echo   5. Agende as tarefas:             setup_task_scheduler.bat
 echo ============================================================================
 pause
