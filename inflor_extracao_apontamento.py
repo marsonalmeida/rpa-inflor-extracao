@@ -27,7 +27,8 @@ from selenium.webdriver.support import expected_conditions as EC
 # Adiciona o diretório src ao path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from inflor_utils import (
-    setup_logging, get_credentials, upload_to_s3, screenshot_on_error,
+    setup_logging, log_step, log_summary,
+    get_credentials, upload_to_s3, screenshot_on_error,
     create_driver, wait_for_download, load_to_postgres,
     DOWNLOAD_DIR_APONTAMENTO, BASE_DIR, S3_BUCKET
 )
@@ -55,14 +56,15 @@ SAIDA_LOCAL = os.environ.get(
 
 def main():
     log = setup_logging("inflor_apontamentos")
+    t0 = time.time()
     log.info("=" * 60)
     log.info("INFLOR EXTRAÇÃO APONTAMENTOS - VM WINDOWS")
     log.info("=" * 60)
 
     driver = None
     try:
-        # Credenciais
-        login, senha = get_credentials(log)
+        with log_step(log, "Credenciais"):
+            login, senha = get_credentials(log)
 
         # Prepara diretório de download
         if os.path.exists(DOWNLOAD_DIR_APONTAMENTO):
@@ -76,191 +78,167 @@ def main():
         datafim = data_hoje.strftime("%d/%m/%Y")
         log.info(f"Período: {datain} a {datafim}")
 
-        # Chrome
-        driver = create_driver(DOWNLOAD_DIR_APONTAMENTO, log, headless=HEADLESS)
+        with log_step(log, "Iniciar Chrome"):
+            driver = create_driver(DOWNLOAD_DIR_APONTAMENTO, log, headless=HEADLESS)
 
         # ---------------------------------------------------------------
         # LOGIN
         # ---------------------------------------------------------------
-        log.info("Acessando página de login")
-        driver.get("https://regreen.inflor.cloud/SGF/Default.aspx?")
-
-        campoLogin = WebDriverWait(driver, 30).until(
-            EC.element_to_be_clickable((By.ID, "txtLogin"))
-        )
-        campoSenha = WebDriverWait(driver, 15).until(
-            EC.element_to_be_clickable((By.ID, "txtSenha"))
-        )
-        campoLogin.send_keys(login)
-        campoSenha.send_keys(senha)
-        campoSenha.send_keys(Keys.RETURN)
-        log.info("Login enviado")
-        time.sleep(5)
+        with log_step(log, "Login INFLOR"):
+            driver.get("https://regreen.inflor.cloud/SGF/Default.aspx?")
+            campoLogin = WebDriverWait(driver, 30).until(
+                EC.element_to_be_clickable((By.ID, "txtLogin"))
+            )
+            campoSenha = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.ID, "txtSenha"))
+            )
+            campoLogin.send_keys(login)
+            campoSenha.send_keys(senha)
+            campoSenha.send_keys(Keys.RETURN)
+            time.sleep(5)
 
         # ---------------------------------------------------------------
-        # NAVEGAÇÃO ATÉ RELATÓRIO
+        # NAVEGAÇÃO + FILTROS + EXPORTAR
         # ---------------------------------------------------------------
-        log.info("Navegando para Silvicultura e Controle")
-        driver.get("https://regreen.inflor.cloud/SGF/DefaultSilviculturaControle.aspx")
+        with log_step(log, "Navegação e exportação"):
+            driver.get("https://regreen.inflor.cloud/SGF/DefaultSilviculturaControle.aspx")
 
-        log.info("Clicando em Relatórios")
-        BtRelatorios = WebDriverWait(driver, 30).until(
-            EC.element_to_be_clickable((By.XPATH, "//div[normalize-space()='Relatórios']"))
-        )
-        BtRelatorios.click()
+            BtRelatorios = WebDriverWait(driver, 30).until(
+                EC.element_to_be_clickable((By.XPATH, "//div[normalize-space()='Relatórios']"))
+            )
+            BtRelatorios.click()
 
-        log.info("Clicando em Apontamentos")
-        BtApontamentos = WebDriverWait(driver, 15).until(
-            EC.element_to_be_clickable((By.XPATH,
-                "/html[1]/body[1]/table[1]/tbody[1]/tr[1]/td[1]/table[2]/tbody[1]"
-                "/tr[1]/td[1]/form[1]/table[8]/tbody[1]/tr[2]/td[1]"))
-        )
-        BtApontamentos.click()
+            BtApontamentos = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.XPATH,
+                    "/html[1]/body[1]/table[1]/tbody[1]/tr[1]/td[1]/table[2]/tbody[1]"
+                    "/tr[1]/td[1]/form[1]/table[8]/tbody[1]/tr[2]/td[1]"))
+            )
+            BtApontamentos.click()
 
-        log.info("Clicando em Consulta Boletins e Apontamentos Geral")
-        BtConsulta = WebDriverWait(driver, 15).until(
-            EC.element_to_be_clickable((By.XPATH,
-                "/html[1]/body[1]/table[1]/tbody[1]/tr[1]/td[1]/table[2]/tbody[1]"
-                "/tr[1]/td[1]/form[1]/table[5]/tbody[1]/tr[2]/td[1]"))
-        )
-        BtConsulta.click()
+            BtConsulta = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.XPATH,
+                    "/html[1]/body[1]/table[1]/tbody[1]/tr[1]/td[1]/table[2]/tbody[1]"
+                    "/tr[1]/td[1]/form[1]/table[5]/tbody[1]/tr[2]/td[1]"))
+            )
+            BtConsulta.click()
 
-        # ---------------------------------------------------------------
-        # IFRAME + FILTROS
-        # ---------------------------------------------------------------
-        log.info("Entrando no iframe")
-        iframe = WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.ID, "conteudo"))
-        )
-        driver.switch_to.frame(iframe)
+            iframe = WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.ID, "conteudo"))
+            )
+            driver.switch_to.frame(iframe)
 
-        log.info(f"Data inicial: {datain}")
-        dtinicial = WebDriverWait(driver, 15).until(
-            EC.element_to_be_clickable((By.ID, "txtDataIni"))
-        )
-        dtinicial.send_keys(datain)
+            dtinicial = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.ID, "txtDataIni"))
+            )
+            dtinicial.send_keys(datain)
 
-        log.info(f"Data final: {datafim}")
-        dtfinal = WebDriverWait(driver, 15).until(
-            EC.element_to_be_clickable((By.ID, "txtDataFim"))
-        )
-        dtfinal.send_keys(datafim)
+            dtfinal = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.ID, "txtDataFim"))
+            )
+            dtfinal.send_keys(datafim)
 
-        # ---------------------------------------------------------------
-        # GERAR + EXPANDIR + EXPORTAR
-        # ---------------------------------------------------------------
-        log.info("Gerando relatório")
-        Btfiltro = WebDriverWait(driver, 15).until(
-            EC.element_to_be_clickable((By.ID, "btnGerar"))
-        )
-        Btfiltro.click()
-        time.sleep(15)
+            Btfiltro = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.ID, "btnGerar"))
+            )
+            Btfiltro.click()
+            time.sleep(15)
 
-        log.info("Expandindo colunas ocultas")
-        Btdetalhes = WebDriverWait(driver, 30).until(
-            EC.element_to_be_clickable((By.XPATH, "//input[@title='Exibir colunas extras']"))
-        )
-        Btdetalhes.click()
-        time.sleep(30)
+            Btdetalhes = WebDriverWait(driver, 30).until(
+                EC.element_to_be_clickable((By.XPATH, "//input[@title='Exibir colunas extras']"))
+            )
+            Btdetalhes.click()
+            time.sleep(30)
 
-        log.info("Exportando para Excel")
-        BtExport = WebDriverWait(driver, 15).until(
-            EC.element_to_be_clickable((By.XPATH, "//input[@title='Exportar dados para Excel']"))
-        )
-        BtExport.click()
+            BtExport = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.XPATH, "//input[@title='Exportar dados para Excel']"))
+            )
+            BtExport.click()
 
-        # Wait inteligente (substitui sleep 120)
-        log.info("Aguardando download...")
-        zip_path = wait_for_download(
-            DOWNLOAD_DIR_APONTAMENTO, timeout=300, extension=".zip", log=log
-        )
+        with log_step(log, "Download"):
+            zip_path = wait_for_download(
+                DOWNLOAD_DIR_APONTAMENTO, timeout=300, extension=".zip", log=log
+            )
 
         # ---------------------------------------------------------------
         # LOGOUT
         # ---------------------------------------------------------------
-        log.info("Fazendo logout")
-        driver.switch_to.default_content()
-        driver.get("https://regreen.inflor.cloud/SGF/DefaultModulos.aspx")
-        BtLogout = WebDriverWait(driver, 15).until(
-            EC.element_to_be_clickable((By.ID, "btnLogOut"))
-        )
-        BtLogout.click()
-        log.info("Logout concluído")
-        driver.quit()
-        driver = None
+        with log_step(log, "Logout"):
+            driver.switch_to.default_content()
+            driver.get("https://regreen.inflor.cloud/SGF/DefaultModulos.aspx")
+            BtLogout = WebDriverWait(driver, 15).until(
+                EC.element_to_be_clickable((By.ID, "btnLogOut"))
+            )
+            BtLogout.click()
+            driver.quit()
+            driver = None
 
         # ---------------------------------------------------------------
-        # UNZIP
+        # UNZIP + PROCESSAR
         # ---------------------------------------------------------------
-        log.info(f"Descompactando: {zip_path}")
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(DOWNLOAD_DIR_APONTAMENTO)
+        with log_step(log, "Unzip e processamento"):
+            with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                zip_ref.extractall(DOWNLOAD_DIR_APONTAMENTO)
 
-        # ---------------------------------------------------------------
-        # PROCESSAR
-        # ---------------------------------------------------------------
-        log.info("Processando arquivo extraído")
-        arquivos_xls = [f for f in os.listdir(DOWNLOAD_DIR_APONTAMENTO)
-                        if f.endswith(".xls") or f.endswith(".xlsx")]
-        if not arquivos_xls:
-            raise FileNotFoundError("Nenhum XLS encontrado após unzip")
+            arquivos_xls = [f for f in os.listdir(DOWNLOAD_DIR_APONTAMENTO)
+                            if f.endswith(".xls") or f.endswith(".xlsx")]
+            if not arquivos_xls:
+                raise FileNotFoundError("Nenhum XLS encontrado após unzip")
 
-        arquivo_final = os.path.join(DOWNLOAD_DIR_APONTAMENTO, arquivos_xls[0])
-        log.info(f"Lendo: {arquivo_final}")
+            arquivo_final = os.path.join(DOWNLOAD_DIR_APONTAMENTO, arquivos_xls[0])
+            df = pd.read_html(arquivo_final, flavor="html5lib",
+                              index_col=None, thousands=".", decimal=",")[0]
+            df.columns = df.iloc[0]
+            df = df[1:].reset_index(drop=True)
 
-        # INFLOR exporta HTML disfarçado de XLS
-        df = pd.read_html(arquivo_final, flavor="html5lib",
-                          index_col=None, thousands=".", decimal=",")[0]
-        df.columns = df.iloc[0]
-        df = df[1:].reset_index(drop=True)
+            colunas_numericas = [
+                "Custo Unitário Recurso", "Custo Recurso", "Rendimento Previsto",
+                "Rendimento Real", "Quantidade", "% Realização", "Valor Produção",
+                "Custo Total Operação", "Custo Unitário Operação", "Uso Solo",
+                "Área (ha)", "Custo Boletim"
+            ]
+            for col in colunas_numericas:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        # Conversões numéricas
-        colunas_numericas = [
-            "Custo Unitário Recurso", "Custo Recurso", "Rendimento Previsto",
-            "Rendimento Real", "Quantidade", "% Realização", "Valor Produção",
-            "Custo Total Operação", "Custo Unitário Operação", "Uso Solo",
-            "Área (ha)", "Custo Boletim"
-        ]
-        for col in colunas_numericas:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
+            if "Tipo Aprovação" in df.columns:
+                df = df[df["Tipo Aprovação"].isin(["Aprovado", "Indefinido"])]
 
-        # Filtro
-        if "Tipo Aprovação" in df.columns:
-            df = df[df["Tipo Aprovação"].isin(["Aprovado", "Indefinido"])]
-
-        log.info(f"Linhas processadas: {len(df)}")
+            log.info(f"Linhas processadas: {len(df)}")
 
         # ---------------------------------------------------------------
-        # SALVAR LOCAL (compatibilidade)
+        # SALVAR LOCAL
         # ---------------------------------------------------------------
-        os.makedirs(SAIDA_LOCAL, exist_ok=True)
-        arquivo_local = os.path.join(SAIDA_LOCAL, "fat_apontamentos_automatico.xlsx")
-        df.to_excel(arquivo_local, index=False)
-        log.info(f"Salvo local: {arquivo_local}")
+        with log_step(log, "Salvar local"):
+            os.makedirs(SAIDA_LOCAL, exist_ok=True)
+            arquivo_local = os.path.join(SAIDA_LOCAL, "fat_apontamentos_automatico.xlsx")
+            df.to_excel(arquivo_local, index=False)
+            log.info(f"Destino: {arquivo_local}")
 
         # ---------------------------------------------------------------
         # UPLOAD S3
         # ---------------------------------------------------------------
-        timestamp = datetime.now().strftime("%Y-%m-%d")
-        year, month, day = datetime.now().strftime("%Y"), datetime.now().strftime("%m"), datetime.now().strftime("%d")
+        with log_step(log, "Upload S3"):
+            timestamp = datetime.now().strftime("%Y-%m-%d")
+            year, month, day = datetime.now().strftime("%Y"), datetime.now().strftime("%m"), datetime.now().strftime("%d")
 
-        # Parquet para datalake
-        parquet_local = os.path.join(DOWNLOAD_DIR_APONTAMENTO, f"apontamentos_{timestamp}.parquet")
-        df.to_parquet(parquet_local, index=False, engine="pyarrow")
-        upload_to_s3(parquet_local, f"{S3_PREFIX}/year={year}/month={month}/day={day}/apontamentos.parquet", log)
+            parquet_local = os.path.join(DOWNLOAD_DIR_APONTAMENTO, f"apontamentos_{timestamp}.parquet")
+            df.to_parquet(parquet_local, index=False, engine="pyarrow")
+            upload_to_s3(parquet_local, f"{S3_PREFIX}/year={year}/month={month}/day={day}/apontamentos.parquet", log)
 
-        # XLSX para consumo humano
-        xlsx_s3 = os.path.join(DOWNLOAD_DIR_APONTAMENTO, "fat_apontamentos_automatico.xlsx")
-        df.to_excel(xlsx_s3, index=False)
-        upload_to_s3(xlsx_s3, f"{S3_PREFIX}/xlsx/fat_apontamentos_automatico.xlsx", log)
+            xlsx_s3 = os.path.join(DOWNLOAD_DIR_APONTAMENTO, "fat_apontamentos_automatico.xlsx")
+            df.to_excel(xlsx_s3, index=False)
+            upload_to_s3(xlsx_s3, f"{S3_PREFIX}/xlsx/fat_apontamentos_automatico.xlsx", log)
 
         # ---------------------------------------------------------------
-        # POSTGRESQL (tabela fato)
+        # POSTGRESQL
         # ---------------------------------------------------------------
-        load_to_postgres(df, "fato_apontamentos", log)
+        with log_step(log, "PostgreSQL"):
+            load_to_postgres(df, "fato_apontamentos", log)
 
-        log.info(f"SUCESSO: {len(df)} linhas extraídas e enviadas")
+        log_summary(log, "apontamentos", t0,
+                    linhas=len(df),
+                    periodo=f"{datain} a {datafim}",
+                    destinos="local+S3+PostgreSQL")
 
     except Exception as e:
         log.error(f"FALHA NA PIPELINE: {e}", exc_info=True)

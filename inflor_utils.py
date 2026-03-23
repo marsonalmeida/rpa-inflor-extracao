@@ -11,7 +11,9 @@ import json
 import time
 import logging
 import boto3
+from contextlib import contextmanager
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 
 # ---------------------------------------------------------------------------
 # CONFIG
@@ -29,32 +31,82 @@ DOWNLOAD_DIR_APONTAMENTO = os.path.join(BASE_DIR, "downloads", "apontamentos")
 DOWNLOAD_DIR_MODELO = os.path.join(BASE_DIR, "downloads", "modelo")
 
 # ---------------------------------------------------------------------------
-# LOGGING (arquivo local + stdout + CloudWatch opcional)
+# LOGGING
 # ---------------------------------------------------------------------------
 
-def setup_logging(script_name: str) -> logging.Logger:
-    """Configura logging para arquivo local + stdout."""
+class _RunAdapter(logging.LoggerAdapter):
+    """Injeta [script][run=ID] em todas as mensagens automaticamente."""
+    def process(self, msg, kwargs):
+        return f"[{self.extra['script']}][run={self.extra['run_id']}] {msg}", kwargs
+
+
+def setup_logging(script_name: str) -> _RunAdapter:
+    """
+    Configura logging com:
+    - Run ID único por execução (para separar execuções no mesmo arquivo)
+    - Rotação automática de arquivo (5 MB, mantém 3 backups)
+    - Formato padronizado: timestamp | level | [script][run=ID] mensagem
+    """
     os.makedirs(LOG_DIR, exist_ok=True)
 
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = os.path.join(LOG_DIR, f"{script_name}.log")
 
-    logger = logging.getLogger(script_name)
+    logger = logging.getLogger(f"{script_name}.{run_id}")
     logger.setLevel(logging.INFO)
 
-    # Formato
-    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    fmt = logging.Formatter("%(asctime)s | %(levelname)-8s | %(message)s",
+                            datefmt="%Y-%m-%d %H:%M:%S")
 
-    # Handler: arquivo (rotação manual - mantém últimas 5MB)
-    fh = logging.FileHandler(log_file, encoding="utf-8")
+    # Arquivo com rotação: 5MB por arquivo, mantém 3 backups
+    fh = RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024,
+                             backupCount=3, encoding="utf-8")
     fh.setFormatter(fmt)
     logger.addHandler(fh)
 
-    # Handler: stdout (visível no Task Scheduler / terminal)
+    # stdout (Task Scheduler / terminal)
     sh = logging.StreamHandler(sys.stdout)
     sh.setFormatter(fmt)
     logger.addHandler(sh)
 
-    return logger
+    adapter = _RunAdapter(logger, {"script": script_name, "run_id": run_id})
+    adapter.run_id = run_id
+    return adapter
+
+
+@contextmanager
+def log_step(log: _RunAdapter, nome: str):
+    """
+    Context manager que loga início, fim e duração de cada etapa.
+    Em caso de erro, loga a falha e re-lança a exceção.
+
+    Uso:
+        with log_step(log, "Download"):
+            ...
+    """
+    inicio = time.time()
+    log.info(f">> {nome}")
+    try:
+        yield
+        log.info(f"<< {nome} OK ({time.time() - inicio:.1f}s)")
+    except Exception:
+        log.error(f"!! {nome} FALHOU ({time.time() - inicio:.1f}s)")
+        raise
+
+
+def log_summary(log: _RunAdapter, script: str, inicio: float, **metricas):
+    """
+    Loga resumo final da execução com métricas consolidadas.
+
+    Uso:
+        log_summary(log, "apontamentos", t0, linhas=15234, destinos="S3+PostgreSQL")
+    """
+    duracao = time.time() - inicio
+    mins, secs = divmod(int(duracao), 60)
+    detalhes = " | ".join(f"{k}={v}" for k, v in metricas.items())
+    log.info("=" * 60)
+    log.info(f"RESUMO [{script}] | tempo={mins}m{secs:02d}s | {detalhes}")
+    log.info("=" * 60)
 
 
 # ---------------------------------------------------------------------------
