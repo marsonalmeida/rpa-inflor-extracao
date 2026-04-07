@@ -1,183 +1,173 @@
-# INFLOR Extração - Deploy na VM Windows AWS
+# INFLOR Extrator - Guia de Instalacao em Outra Maquina (Windows)
 
-## Visão Geral
+Este guia cobre o necessario para instalar e colocar em producao os scripts:
+- `inflor_extracao_apontamento.py`
+- `inflor_extracao_model.py`
 
-Scripts Python rodando na VM Windows com Task Scheduler.
-Extrai dados do INFLOR, salva localmente (compatibilidade) e envia pro S3 (datalake).
+Os dois scripts rodam via Task Scheduler e fazem o processamento completo de periodos em uma unica execucao diaria.
 
-```
-Task Scheduler (cron) → Python + Chrome → INFLOR (scraping)
-                                            ↓
-                         Salva local (XLSX) + Upload S3 (Parquet + XLSX)
-                                                      ↓
-                                              Glue/Lambda → Tabela Fato
-```
+## 1. Pre-requisitos da maquina
 
-## Estrutura do Projeto
+Instale antes:
 
-```
-C:\inflor-extrator\
-├── src\
-│   ├── inflor_utils.py                 # Módulo comum (credenciais, S3, Chrome, logging)
-│   ├── inflor_extracao_apontamento.py  # Script: Apontamentos
-│   └── inflor_extracao_model.py        # Script: Modelo/Cubo
-├── logs\                               # Logs de execução
-├── downloads\                          # Arquivos temporários de download
-│   ├── apontamentos\
-│   └── modelo\
-├── debug\                              # Screenshots e HTML em caso de erro
-└── requirements.txt
+1. Python 3.11+
+2. Google Chrome
+3. AWS CLI v2
+
+Validacoes rapidas:
+
+```powershell
+python --version
+aws --version
 ```
 
-## Passo a Passo
+## 2. Copiar projeto para a maquina
 
-### PASSO 1: Preparar a VM (uma vez)
+Exemplo de pasta de trabalho:
 
-1. **Instalar Python 3.11+**
-   - Baixar de https://python.org
-   - Marcar "Add to PATH" na instalação
-
-2. **Instalar Google Chrome**
-   - Baixar de https://google.com/chrome
-   - O `chromedriver_autoinstaller` cuida do driver
-
-3. **Instalar AWS CLI**
-   - Baixar de https://aws.amazon.com/cli/
-   - Configurar: `aws configure`
-     - Access Key ID: (da IAM role/user)
-     - Secret Access Key: (da IAM role/user)
-     - Region: us-east-1
-
-4. **Executar setup**
-   ```cmd
-   cd C:\caminho\dos\arquivos
-   setup.bat
-   ```
-
-### PASSO 2: Configurar credenciais (uma vez)
-
-**Opção A — Secrets Manager (recomendado):**
-```cmd
-aws secretsmanager create-secret ^
-    --name inflor/credentials ^
-    --secret-string "{\"LOGIN_INFLOR\":\"usuario@re.green\",\"SENHA_INFLOR\":\"sua_senha\"}"
+```text
+C:\caminho\dos\arquivos\
+  setup.bat
+  setup_task_scheduler.bat
+  inflor_utils.py
+  inflor_extracao_apontamento.py
+  inflor_extracao_model.py
+  requirements.txt
 ```
 
-**Opção B — Variáveis de ambiente (alternativa):**
-```cmd
-setx LOGIN_INFLOR "usuario@re.green"
-setx SENHA_INFLOR "sua_senha"
+## 3. Executar setup automatico
+
+No Prompt/PowerShell como administrador:
+
+```powershell
+cd C:\caminho\dos\arquivos
+.\setup.bat
 ```
 
-**Opção C — Arquivo .env (compatibilidade com original):**
-Criar arquivo `.env` em `C:\inflor-extrator\`:
+O setup faz:
+- cria `C:\inflor-extrator\` e subpastas
+- copia scripts para `C:\inflor-extrator\src\`
+- cria venv em `C:\inflor-extrator\.venv`
+- instala dependencias no venv
+
+## 4. Configurar credenciais INFLOR
+
+Os scripts tentam nesta ordem:
+1. `.env`
+2. variaveis de ambiente
+3. AWS Secrets Manager (`inflor/credentials`)
+
+### Opcao recomendada: Secrets Manager
+
+```powershell
+aws secretsmanager create-secret --name inflor/credentials --secret-string "{\"LOGIN_INFLOR\":\"usuario@re.green\",\"SENHA_INFLOR\":\"SUA_SENHA\"}"
 ```
+
+Se ja existir:
+
+```powershell
+aws secretsmanager put-secret-value --secret-id inflor/credentials --secret-string "{\"LOGIN_INFLOR\":\"usuario@re.green\",\"SENHA_INFLOR\":\"SUA_SENHA\"}"
+```
+
+### Opcao local (.env)
+
+Crie `C:\inflor-extrator\src\.env`:
+
+```dotenv
 LOGIN_INFLOR=usuario@re.green
 SENHA_INFLOR=sua_senha
+LAKE_ENV=prd
+DRY_RUN=false
 ```
 
-O script tenta na ordem: Secrets Manager → env vars → .env
+Para testes sem upload ao lake:
 
-### PASSO 3: Teste manual
-
-```cmd
-cd C:\inflor-extrator
-python src\inflor_extracao_apontamento.py
+```dotenv
+DRY_RUN=true
 ```
 
-Observar:
-- Login funciona?
-- Navegação até o relatório funciona?
-- Download completa?
-- Upload pro S3 funciona? (`aws s3 ls s3://datalake-inflor-raw/inflor/`)
+Observacao sobre destinos por ambiente:
+- `LAKE_ENV=prd` grava local em `C:\inflor-extrator\output\PRD\...` e S3 em `prd-monitoring-onedrive-sync/...`
+- `LAKE_ENV=stg` grava local em `C:\inflor-extrator\output\STG\...` e S3 em `stg-monitoring-onedrive-sync/...`
+- `DRY_RUN=true` grava somente local (sem upload S3)
 
-Se falhar, checar `C:\inflor-extrator\logs\` e `C:\inflor-extrator\debug\`.
+## 5. Teste manual antes de agendar
 
-### PASSO 4: Agendar no Task Scheduler
-
-```cmd
-setup_task_scheduler.bat
+```powershell
+C:\inflor-extrator\.venv\Scripts\python.exe C:\inflor-extrator\src\inflor_extracao_apontamento.py
+C:\inflor-extrator\.venv\Scripts\python.exe C:\inflor-extrator\src\inflor_extracao_model.py
 ```
 
-Isso cria duas tarefas:
-- **Apontamentos**: diário às 07:00
-- **Modelo**: diário às 19:00
+Conferir:
+- logs em `C:\inflor-extrator\logs\`
+- saidas em `C:\inflor-extrator\output\PRD\...` ou `C:\inflor-extrator\output\STG\...` (conforme `LAKE_ENV`)
+- consolidado final:
+  - `C:\inflor-extrator\output\<PRD|STG>\apontamentos\Painel de monitoramento\Operações\Atividades executadas\Apontamento de atividades.xlsx`
+  - `C:\inflor-extrator\output\<PRD|STG>\apontamentos\Painel de monitoramento\Operações\Detalhamento de Talhões\Inflor\base.xlsx`
 
-### PASSO 5: Validar dados no S3
+## 6. Criar agendamento no Windows
 
-```cmd
-aws s3 ls s3://datalake-inflor-raw/inflor/apontamentos/ --recursive
-aws s3 ls s3://datalake-inflor-raw/inflor/modelo/ --recursive
+```powershell
+cd C:\caminho\dos\arquivos
+.\setup_task_scheduler.bat
 ```
 
-### PASSO 6: Desligar processo antigo
+Tarefas criadas:
+- `INFLOR\Extracao Modelo` (08:00)
+- `INFLOR\Extracao Apontamentos` (10:00)
 
-Depois de 3-5 execuções bem-sucedidas:
-1. Para o script na máquina do operador antigo
-2. Remove/desativa o flow do NiFi (se só servia este fluxo)
+As tarefas usam o Python da venv:
+- `C:\inflor-extrator\.venv\Scripts\python.exe`
 
----
+## 7. Validacao pos-deploy
 
-## O que mudou vs. o original
+### Ver ultima execucao das tarefas
 
-| Aspecto | Original | Novo |
-|---------|----------|------|
-| Onde roda | Máquina do operador | VM Windows AWS |
-| Credenciais | `.env` local | Secrets Manager (com fallback) |
-| Saída | Só local (OneDrive/pasta) | Local + S3 (Parquet + XLSX) |
-| Agendamento | Manual ou task scheduler local | Task Scheduler na VM |
-| Logs | Arquivo `.log` básico | Log estruturado (arquivo + stdout) |
-| Debug em falha | Nada | Screenshot + HTML salvos local + S3 |
-| Download wait | `time.sleep(120)` fixo | Polling ativo com timeout |
-| Código | 2 scripts monolíticos | 3 arquivos (utils + 2 scripts) |
-| Seletores Selenium | Mix de XPath e ID | Preferência por ID onde possível |
+```powershell
+schtasks /query /tn "INFLOR\Extracao Apontamentos" /fo LIST
+schtasks /query /tn "INFLOR\Extracao Modelo" /fo LIST
+```
 
-## O que NÃO mudou (propositalmente)
+### Rodar tarefa manualmente
 
-- **Lógica de navegação**: mesmos cliques, mesma ordem, mesmos XPaths
-- **Processamento de dados**: mesmas conversões, mesmos filtros
-- **Saída local**: mantida nos mesmos caminhos pra compatibilidade
-- **chromedriver_autoinstaller**: mantido pra VM Windows
-- **Lista de períodos (modelo)**: mantida hardcoded
+```powershell
+schtasks /run /tn "INFLOR\Extracao Apontamentos"
+schtasks /run /tn "INFLOR\Extracao Modelo"
+```
 
----
+### Verificar upload no lake
 
-## Próximos passos (melhorias futuras)
+```powershell
+aws s3 ls s3://re.green-assets/prd-monitoring-onedrive-sync/ --recursive
+aws s3 ls s3://re.green-assets/stg-monitoring-onedrive-sync/ --recursive
+```
 
-1. **Períodos dinâmicos**: calcular automaticamente ao invés de hardcode
-2. **Headless**: rodar com `HEADLESS=true` se não precisa de GUI
-3. **Alertas**: CloudWatch Agent na VM + SNS pra alertar falhas
-4. **Eliminar NiFi**: se o S3 já é o destino, NiFi vira desnecessário
-5. **Ingestão direto do S3**: Lambda/Glue trigger no S3 → tabela fato
+## 8. Checklist final (go-live)
 
----
+- Python, Chrome e AWS CLI instalados
+- `setup.bat` executado sem erros
+- credenciais INFLOR configuradas
+- teste manual OK dos dois scripts
+- tarefas do Scheduler criadas e visiveis
+- logs sem erro em `C:\inflor-extrator\logs\`
+- arquivos finais consolidados gerados
+- upload no S3 confirmado (ou `DRY_RUN=true` em homologacao)
 
-## Troubleshooting
+## 9. Troubleshooting rapido
 
-### Chrome não abre / chromedriver falha
-- Verifique se Chrome está instalado e atualizado
-- `chromedriver_autoinstaller` baixa o driver correto automaticamente
-- Se bloqueado por proxy/firewall, baixe manualmente e coloque em PATH
+### Task Scheduler falha com python nao encontrado
+- Reexecute `setup.bat` e `setup_task_scheduler.bat`
+- Confirme existencia de `C:\inflor-extrator\.venv\Scripts\python.exe`
 
-### Login falha
-- Verifique credenciais no Secrets Manager: `aws secretsmanager get-secret-value --secret-id inflor/credentials`
-- O INFLOR pode ter mudado a tela de login
+### Erro de credenciais INFLOR
+- Verifique `.env` em `C:\inflor-extrator\src\`
+- Ou valide segredo:
 
-### Download não completa (timeout)
-- O relatório de 120 meses pode ser grande
-- Aumente `timeout` em `wait_for_download()` no código
-- Verifique espaço em disco em `C:\inflor-extrator\downloads\`
+```powershell
+aws secretsmanager get-secret-value --secret-id inflor/credentials
+```
 
 ### Upload S3 falha
-- Verifique `aws configure` (credenciais AWS)
-- Verifique se o bucket existe: `aws s3 ls s3://datalake-inflor-raw/`
-- Verifique permissões IAM (s3:PutObject no bucket)
-
-### Script de modelo demora muito
-- 14 períodos × ~1-2 min cada = 15-30 min é normal
-- Se > 45 min, o INFLOR pode estar lento
-
-### Onde estão os logs de erro?
-- `C:\inflor-extrator\logs\inflor_apontamentos.log`
-- `C:\inflor-extrator\logs\inflor_modelo.log`
-- `C:\inflor-extrator\debug\` (screenshots e HTML de páginas com erro)
+- Verifique `aws configure`
+- Verifique permissoes IAM (`s3:PutObject` no bucket alvo)
+- Em homologacao, use `DRY_RUN=true`

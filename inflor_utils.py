@@ -33,8 +33,14 @@ CW_LOG_GROUP = _cfg("CLOUDWATCH_LOG_GROUP", default="")
 
 # Lake S3: bucket monitorado pelo NiFi → EMR → refined
 LAKE_S3_BUCKET = _cfg("LAKE_S3_BUCKET", default="re.green-assets")
-LAKE_ENV       = _cfg("LAKE_ENV",       default="prd")   # "stg" | "prd"
+LAKE_ENV_RAW   = _cfg("LAKE_ENV",       default="prd")
+LAKE_ENV       = (LAKE_ENV_RAW or "prd").strip().lower()  # "stg" | "prd"
 DRY_RUN        = _cfg("DRY_RUN",        default=False, cast=bool)
+
+if LAKE_ENV not in {"prd", "stg"}:
+    LAKE_ENV = "prd"
+
+LOCAL_ENV_DIR = LAKE_ENV.upper()
 
 LAKE_PATH_APONTAMENTOS = (
     f"{LAKE_ENV}-monitoring-onedrive-sync/"
@@ -44,7 +50,7 @@ LAKE_PATH_APONTAMENTOS = (
 LAKE_PATH_MODELO = (
     f"{LAKE_ENV}-monitoring-onedrive-sync/"
     "Opera\u00e7\u00f5es/Detalhamento de Talh\u00f5es/Pol\u00edgonos/"
-    "base_modelo.xlsx"
+    "base.xlsx"
 )
 
 # Bucket de debug (screenshots/html em falhas) — separado do lake
@@ -52,13 +58,43 @@ DEBUG_S3_BUCKET = _cfg("DEBUG_S3_BUCKET", default="datalake-inflor-raw")
 
 # Diretório base na VM Windows (adaptar se necessário)
 BASE_DIR = os.environ.get("INFLOR_BASE_DIR", r"C:\inflor-extrator")
+LOCAL_OUTPUT_ROOT = os.path.join(BASE_DIR, "output", LOCAL_ENV_DIR)
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 DOWNLOAD_DIR_APONTAMENTO = os.path.join(BASE_DIR, "downloads", "apontamentos")
 DOWNLOAD_DIR_MODELO = os.path.join(BASE_DIR, "downloads", "modelo")
 OUTPUT_DIR_APONTAMENTO = os.environ.get("SAIDA_LOCAL_APONTAMENTO",
-                                         os.path.join(BASE_DIR, "output", "apontamentos"))
+                                 os.path.join(LOCAL_OUTPUT_ROOT, "apontamentos"))
 OUTPUT_DIR_MODELO = os.environ.get("SAIDA_LOCAL_MODELO",
-                                    os.path.join(BASE_DIR, "output", "modelo"))
+                             os.path.join(LOCAL_OUTPUT_ROOT, "modelo"))
+
+FINAL_FILE_APONTAMENTO = os.environ.get(
+    "ARQUIVO_FINAL_APONTAMENTO",
+    os.path.join(
+        BASE_DIR,
+        "output",
+        LOCAL_ENV_DIR,
+        "apontamentos",
+        "Painel de monitoramento",
+        "Operações",
+        "Atividades executadas",
+        "Apontamento de atividades.xlsx",
+    ),
+)
+
+FINAL_FILE_MODELO = os.environ.get(
+    "ARQUIVO_FINAL_MODELO",
+    os.path.join(
+        BASE_DIR,
+        "output",
+        LOCAL_ENV_DIR,
+        "apontamentos",
+        "Painel de monitoramento",
+        "Operações",
+        "Detalhamento de Talhões",
+        "Inflor",
+        "base.xlsx",
+    ),
+)
 
 # ---------------------------------------------------------------------------
 # LOGGING
@@ -183,18 +219,19 @@ def with_retry(func, retries: int = 3, delay: int = 30, log=None, label: str = "
 
 def get_credentials(log: logging.Logger) -> tuple[str, str]:
     """
-    Busca credenciais do AWS Secrets Manager.
-    Fallback: variáveis de ambiente (pra teste local).
+    Busca credenciais do arquivo .env (prioridade local).
+    Fallback: variáveis de ambiente.
+    Último: AWS Secrets Manager (produção).
     """
-    # Tenta Secrets Manager primeiro
+    # Prioriza arquivo .env para desenvolvimento local
     try:
-        client = boto3.client("secretsmanager", region_name=AWS_REGION)
-        response = client.get_secret_value(SecretId=SECRET_NAME)
-        secret = json.loads(response["SecretString"])
-        log.info("Credenciais obtidas do Secrets Manager")
-        return secret["LOGIN_INFLOR"], secret["SENHA_INFLOR"]
+        login = _cfg("LOGIN_INFLOR")
+        senha = _cfg("SENHA_INFLOR")
+        if login and senha:
+            log.info("Credenciais obtidas do arquivo .env")
+            return login, senha
     except Exception as e:
-        log.warning(f"Secrets Manager indisponível ({e}), tentando variáveis de ambiente")
+        log.debug(f"Arquivo .env não disponível: {e}")
 
     # Fallback: variáveis de ambiente
     login = os.environ.get("LOGIN_INFLOR")
@@ -203,17 +240,17 @@ def get_credentials(log: logging.Logger) -> tuple[str, str]:
         log.info("Credenciais obtidas de variáveis de ambiente")
         return login, senha
 
-    # Fallback 2: arquivo .env via decouple
+    # Último recurso: AWS Secrets Manager (produção)
     try:
-        login = _cfg("LOGIN_INFLOR")
-        senha = _cfg("SENHA_INFLOR")
-        if login and senha:
-            log.info("Credenciais obtidas do arquivo .env")
-            return login, senha
-    except Exception:
-        pass
+        client = boto3.client("secretsmanager", region_name=AWS_REGION)
+        response = client.get_secret_value(SecretId=SECRET_NAME)
+        secret = json.loads(response["SecretString"])
+        log.info("Credenciais obtidas do Secrets Manager")
+        return secret["LOGIN_INFLOR"], secret["SENHA_INFLOR"]
+    except Exception as e:
+        log.warning(f"Secrets Manager indisponível ({e})")
 
-    raise RuntimeError("Não foi possível obter credenciais. Configure Secrets Manager, env vars ou .env")
+    raise RuntimeError("Não foi possível obter credenciais. Configure .env, env vars ou Secrets Manager")
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +347,7 @@ def screenshot_on_error(driver, step_name: str, s3_prefix: str, log: logging.Log
 
 def create_driver(download_dir: str, log: logging.Logger, headless: bool = False):
     """
-    Cria Chrome driver.
+    Cria Chrome driver otimizado para execuções longas.
     Na VM Windows: usa chromedriver_autoinstaller (mantém compatibilidade).
     headless=False por padrão na VM (pode mudar pra True se não precisa de GUI).
     """
@@ -319,20 +356,41 @@ def create_driver(download_dir: str, log: logging.Logger, headless: bool = False
 
     chrome_options = webdriver.ChromeOptions()
 
+    # Configurações para execuções longas e estáveis
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-web-security")
+    chrome_options.add_argument("--disable-features=VizDisplayCompositor")
+    chrome_options.add_argument("--disable-ipc-flooding-protection")
+    chrome_options.add_argument("--disable-background-timer-throttling")
+    chrome_options.add_argument("--disable-backgrounding-occluded-windows")
+    chrome_options.add_argument("--disable-renderer-backgrounding")
+    chrome_options.add_argument("--disable-features=TranslateUI")
+    chrome_options.add_argument("--disable-ipc-flooding-protection")
+    chrome_options.add_argument("--max_old_space_size=4096")
+    chrome_options.add_argument("--memory-pressure-off")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+
     if headless:
         chrome_options.add_argument("--headless=new")
         chrome_options.add_argument("--disable-gpu")
 
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-plugins")
+    chrome_options.add_argument("--disable-images")  # Otimização: não carrega imagens
+    chrome_options.add_argument("--disable-javascript")  # Se não precisar de JS complexo
 
     chrome_options.add_experimental_option("prefs", {
         "download.default_directory": download_dir,
         "download.prompt_for_download": False,
         "download.directory_upgrade": True,
-        "safebrowsing.enabled": True
+        "safebrowsing.enabled": True,
+        "profile.managed_default_content_settings.images": 2,  # Bloqueia imagens
+        "profile.default_content_setting_values.notifications": 2,
+        "profile.managed_default_content_settings.media_stream": 2,
     })
 
     # chromedriver_autoinstaller: mantém do original
@@ -340,10 +398,20 @@ def create_driver(download_dir: str, log: logging.Logger, headless: bool = False
     chromedriver_path = chromedriver_autoinstaller.install()
     log.info(f"Chromedriver: {chromedriver_path}")
 
-    driver = webdriver.Chrome(
-        service=ChromeService(chromedriver_path),
-        options=chrome_options
-    )
+    service = ChromeService(chromedriver_path)
+    # service.add_argument("--log-level=3")  # Método não existe no ChromeService
+
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+
+    # Configurações adicionais do driver para estabilidade
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": """
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined,
+            });
+        """
+    })
+
     return driver
 
 
