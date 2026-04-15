@@ -5,6 +5,7 @@ set "BASE_DIR=C:\inflor-extrator"
 set "SRC_DIR=%BASE_DIR%\src"
 set "VENV_DIR=%BASE_DIR%\.venv"
 set "PYTHON_EXE=%VENV_DIR%\Scripts\python.exe"
+set "NO_PAUSE=%INFLOR_NO_PAUSE%"
 
 REM ============================================================================
 REM INFLOR Extrator - Setup na VM Windows
@@ -42,7 +43,7 @@ if not exist "%VENV_DIR%" (
 if %errorlevel% neq 0 (
     echo ERRO: Nao foi possivel criar o ambiente virtual Python.
     echo Verifique se Python 3.11+ esta instalado e no PATH.
-    pause
+    if /I not "%NO_PAUSE%"=="1" pause
     exit /b 1
 )
 
@@ -51,7 +52,7 @@ echo [4/8] Instalando dependencias Python na venv...
 "%PYTHON_EXE%" -m pip install -r "%BASE_DIR%\requirements.txt"
 if %errorlevel% neq 0 (
     echo ERRO: Falha ao instalar dependências. Verifique se o Python está instalado.
-    pause
+    if /I not "%NO_PAUSE%"=="1" pause
     exit /b 1
 )
 
@@ -96,4 +97,4 @@ echo        "%PYTHON_EXE%" "%SRC_DIR%\inflor_extracao_apontamento.py"
 echo        "%PYTHON_EXE%" "%SRC_DIR%\inflor_extracao_model.py"
 echo   5. Agende as tarefas:             setup_task_scheduler.bat
 echo ============================================================================
-pause
+if /I not "%NO_PAUSE%"=="1" pause

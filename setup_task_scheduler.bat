@@ -4,11 +4,12 @@ setlocal
 set "BASE_DIR=C:\inflor-extrator"
 set "PYTHON_EXE=%BASE_DIR%\.venv\Scripts\python.exe"
 set "SRC_DIR=%BASE_DIR%\src"
+set "NO_PAUSE=%INFLOR_NO_PAUSE%"
 
 if not exist "%PYTHON_EXE%" (
     echo ERRO: Python da venv nao encontrado em %PYTHON_EXE%
     echo Execute setup.bat antes de configurar o Task Scheduler.
-    pause
+    if /I not "%NO_PAUSE%"=="1" pause
     exit /b 1
 )
 
@@ -55,4 +56,4 @@ echo Para remover:
 echo   schtasks /delete /tn "INFLOR\Extracao Apontamentos" /f
 echo   schtasks /delete /tn "INFLOR\Extracao Modelo" /f
 echo ============================================================================
-pause
+if /I not "%NO_PAUSE%"=="1" pause
